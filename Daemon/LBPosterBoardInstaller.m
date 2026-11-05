@@ -1340,13 +1340,15 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
             }
         } else {
             long long srcNumeric = [srcIDText longLongValue];
-            if (srcNumeric >= minCandidate && srcNumeric <= maxCandidate && ![usedIDs containsObject:@(srcNumeric)]) {
-                identifier = (NSInteger)srcNumeric;
-            } else {
-                for (NSUInteger attempt = 0; attempt < 1000; attempt++) {
-                    NSInteger candidate = minCandidate + arc4random_uniform((uint32_t)rangeCandidate);
-                    if (![usedIDs containsObject:@(candidate)]) { identifier = candidate; break; }
+            for (NSUInteger attempt = 0; attempt < 1000; attempt++) {
+                NSInteger candidate = minCandidate + arc4random_uniform((uint32_t)rangeCandidate);
+                if (candidate != srcNumeric && ![usedIDs containsObject:@(candidate)]) {
+                    identifier = candidate;
+                    break;
                 }
+            }
+            if (!identifier && srcNumeric >= minCandidate && srcNumeric <= maxCandidate && ![usedIDs containsObject:@(srcNumeric)]) {
+                identifier = (NSInteger)srcNumeric;
             }
         }
         if (!identifier) {
