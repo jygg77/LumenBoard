@@ -203,9 +203,17 @@ static NSString *LBReadTrimmedString(NSString *path) {
 }
 
 static BOOL LBIsPositiveNumericIdentifier(id value) {
-    if (![value isKindOfClass:NSNumber.class]) return NO;
-    long long number = [value longLongValue];
-    return number > 0 && number <= 999999;
+    if ([value isKindOfClass:NSNumber.class]) {
+        long long number = [(NSNumber *)value longLongValue];
+        return number > 0 && number <= 999999;
+    }
+    if ([value isKindOfClass:NSString.class]) {
+        NSString *trimmed = [(NSString *)value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSScanner *scanner = trimmed.length ? [NSScanner scannerWithString:trimmed] : nil;
+        long long number = 0;
+        return scanner && [scanner scanLongLong:&number] && scanner.isAtEnd && number > 0 && number <= 999999;
+    }
+    return NO;
 }
 
 static BOOL LBPathIsSafeRelative(NSString *path) {
@@ -579,6 +587,18 @@ static BOOL LBRewriteDescriptorIdentifiers(NSString *root, NSInteger numericID, 
         if (!LBUpdateSuggestionMetadata(root, oldIDText, descriptorID, error)) return NO;
     }
 
+    NSString *rolePath = [root stringByAppendingPathComponent:@"com.apple.posterkit.role.identifier"];
+    if (!LBIsRegularFile(rolePath)) {
+        NSData *roleData = [@"PRPosterRoleLockScreen" dataUsingEncoding:NSUTF8StringEncoding];
+        if (roleData) LBWriteDataAtomically(roleData, rolePath, NULL);
+    }
+
+    NSString *providerInfoPath = [root stringByAppendingPathComponent:@"providerInfo.plist"];
+    if (!LBIsRegularFile(providerInfoPath)) {
+        NSData *provider = [NSKeyedArchiver archivedDataWithRootObject:@{@"kConfigurationLastUseDateKey": [NSDate date]} requiringSecureCoding:NO error:nil];
+        if (provider) LBWriteDataAtomically(provider, providerInfoPath, NULL);
+    }
+
     NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:root];
     NSString *relative = nil;
     while ((relative = enumerator.nextObject)) {
@@ -868,6 +888,7 @@ static BOOL LBReadExistingNumericIdentifiers(NSString *descriptorRoot,
     return YES;
 }
 
+__attribute__((unused))
 static BOOL LBRegisterDescriptorsInSQLiteDatabase(NSString *dbPath,
                                                  NSArray<NSString *> *uuids,
                                                  NSString *providerId,
@@ -973,6 +994,7 @@ static BOOL LBRegisterDescriptorsInSQLiteDatabase(NSString *dbPath,
     return ok;
 }
 
+__attribute__((unused))
 static void LBRollbackDescriptorsInSQLiteDatabase(NSString *dbPath, NSArray<NSString *> *uuids) {
     if (!uuids.count) return;
     struct stat s;
@@ -1003,6 +1025,42 @@ static void LBRollbackDescriptorsInSQLiteDatabase(NSString *dbPath, NSArray<NSSt
     if (delPoster) sqlite3_finalize(delPoster);
     sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
     sqlite3_close(db);
+}
+
+static void LBCleanupStaleDescriptors(NSString *descriptorRoot) {
+    if (!descriptorRoot.length || !LBIsDirectory(descriptorRoot)) return;
+    NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:descriptorRoot error:nil];
+    for (NSString *entry in entries ?: @[]) {
+        if ([entry hasPrefix:@".lumenboard-staging-"]) {
+            [NSFileManager.defaultManager removeItemAtPath:[descriptorRoot stringByAppendingPathComponent:entry] error:nil];
+            continue;
+        }
+        NSString *path = [descriptorRoot stringByAppendingPathComponent:entry];
+        struct stat st;
+        if (lstat(path.fileSystemRepresentation, &st) != 0 || !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) continue;
+
+        NSArray<NSString *> *contents = [NSFileManager.defaultManager contentsOfDirectoryAtPath:path error:nil];
+        if (!contents || contents.count == 0) {
+            [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+            continue;
+        }
+
+        NSString *rootIDPath = [path stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
+        struct stat rootIDStat;
+        BOOL hasRootID = (lstat(rootIDPath.fileSystemRepresentation, &rootIDStat) == 0 && S_ISREG(rootIDStat.st_mode) && rootIDStat.st_size > 0);
+        if (!hasRootID) {
+            NSNumber *metadataID = nil;
+            if (LBReadExistingDescriptorMetadataIdentifier(path, &metadataID, nil) && metadataID) {
+                NSString *idText = [NSString stringWithFormat:@"%@", metadataID];
+                [idText writeToFile:rootIDPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            } else {
+                NSString *versionsPath = [path stringByAppendingPathComponent:@"versions"];
+                if (!LBIsDirectory(versionsPath)) {
+                    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+                }
+            }
+        }
+    }
 }
 
 static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray<NSString *> *uuids) {
@@ -1217,6 +1275,7 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
     NSString *applicationSupport = [containerPath stringByAppendingPathComponent:@"Library/Application Support"];
     NSString *extensionRoot = [[applicationSupport stringByAppendingPathComponent:@"PRBPosterExtensionDataStore/59/Extensions"] stringByAppendingPathComponent:LBCollectionsExtension];
     NSString *descriptorRoot = [extensionRoot stringByAppendingPathComponent:@"descriptors"];
+    LBCleanupStaleDescriptors(descriptorRoot);
 
     NSString *stage = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"LumenBoard-%@", NSUUID.UUID.UUIDString.lowercaseString]];
     NSError *validationError = nil;
@@ -1461,6 +1520,8 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
         if (lstat(sqlitePath.fileSystemRepresentation, &sqStat) == 0 && S_ISREG(sqStat.st_mode)) {
             LBCleanupStalePosterBoardDatabase(sqlitePath, storeRoot);
         }
+        NSString *descRoot = [[[storeRoot stringByAppendingPathComponent:@"Extensions"] stringByAppendingPathComponent:LBCollectionsExtension] stringByAppendingPathComponent:@"descriptors"];
+        LBCleanupStaleDescriptors(descRoot);
         NSError *serializationError = nil;
         NSData *data = [NSPropertyListSerialization dataWithPropertyList:preferences
             format:NSPropertyListBinaryFormat_v1_0 options:0 error:&serializationError];
@@ -1536,6 +1597,7 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
 + (BOOL)removeDescriptorIdentifiers:(NSArray<NSString *> *)identifiers
               posterBoardContainer:(NSString *)containerPath
                              error:(NSError **)error {
+    (void)error;
     if (!identifiers.count || !LBIsDirectory(containerPath)) return YES;
     NSString *descriptorRoot = [[containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore/59/Extensions"] stringByAppendingPathComponent:[LBCollectionsExtension stringByAppendingPathComponent:@"descriptors"]];
     for (NSString *uuid in identifiers) {

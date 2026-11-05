@@ -223,7 +223,8 @@ def inspect_archive(archive: Path) -> dict[str, Any]:
                     raise TendiesError(f"Wallpaper.plist root must be a dictionary: {name!r}")
                 if not {"identifier", "name", "assets"}.issubset(parsed):
                     raise TendiesError(f"Wallpaper.plist is missing required top-level fields: {name!r}")
-                if type(parsed["identifier"]) is not int or not isinstance(parsed["name"], str) or not isinstance(parsed["assets"], dict):
+                is_valid_id = (type(parsed["identifier"]) is int and parsed["identifier"] > 0) or (isinstance(parsed["identifier"], str) and parsed["identifier"].isdigit())
+                if not is_valid_id or not isinstance(parsed["name"], str) or not isinstance(parsed["assets"], dict):
                     raise TendiesError(f"Wallpaper.plist contains invalid identifier/name/assets types: {name!r}")
                 wallpaper_plists.append(name)
         if not parseable_plists:

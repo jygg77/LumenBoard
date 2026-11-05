@@ -197,6 +197,8 @@ def _validate_one(descriptor: Path, report: dict[str, Any], seen_descriptor_ids:
         report["warnings"].append(f"{root_label}: logicalScreenClass {logical_screen_class!r} does not match requested target {expected_screen_class!r}; this is a metadata mismatch, not a renderer compatibility verdict")
 
     wallpaper_id = metadata.get("identifier")
+    if isinstance(wallpaper_id, str) and wallpaper_id.isdigit():
+        wallpaper_id = int(wallpaper_id)
     if isinstance(wallpaper_id, bool) or not isinstance(wallpaper_id, int) or wallpaper_id < 0:
         report["errors"].append(f"{root_label}: Wallpaper.plist identifier must be a non-negative integer in the observed PosterForge schema")
         wallpaper_id = None
@@ -230,6 +232,8 @@ def _validate_one(descriptor: Path, report: dict[str, Any], seen_descriptor_ids:
         except ConsistencyError as exc:
             report["errors"].append(f"{root_label}: {exc}")
         representing_id = user_info.get("wallpaperRepresentingIdentifier")
+        if isinstance(representing_id, int):
+            representing_id = str(representing_id)
         if not isinstance(representing_id, str) or not representing_id.isdecimal():
             report["errors"].append(f"{root_label}: userInfo wallpaperRepresentingIdentifier is not a decimal string")
         elif wallpaper_id is not None and representing_id != str(wallpaper_id):

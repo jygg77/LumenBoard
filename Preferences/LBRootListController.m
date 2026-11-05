@@ -151,7 +151,7 @@ static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *
     NSDictionary *request = @{
         @"requestID": requestID,
         @"action": action,
-        @"identifier": identifier,
+        @"identifier": identifier ?: @"system",
         @"created": [NSDate date]
     };
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:request
@@ -753,7 +753,7 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
 
 - (void)restartPosterBoardTapped {
     NSError *daemonError = nil;
-    LBQueueDaemonActionAndWait(nil, @"refresh-posterboard", nil, nil, NULL, &daemonError);
+    LBQueueDaemonActionAndWait(@"system", @"refresh-posterboard", nil, nil, NULL, &daemonError);
     NSString *killallPath = nil;
     for (NSString *base in @[@"/var/jb/usr/bin", @"/usr/bin", @"/bin"]) {
         NSString *candidate = [base stringByAppendingPathComponent:@"killall"];

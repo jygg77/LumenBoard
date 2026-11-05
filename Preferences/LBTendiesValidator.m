@@ -245,7 +245,10 @@ static NSData *LBTProcessMember(const uint8_t *input, NSUInteger inputLength, NS
             if(!object){if(error)*error=LBTMakeError(32,[NSString stringWithFormat:@"Malformed plist %@: %@",e.name,pe.localizedDescription]);return @{@"status":@"invalid",@"errors":@[@"Malformed plist"]};}
             [plists addObject:e.name];
             if([e.name.lastPathComponent.lowercaseString isEqualToString:@"wallpaper.plist"]){
-                if(![object isKindOfClass:NSDictionary.class]||![object[@"identifier"] isKindOfClass:NSNumber.class]||![object[@"name"] isKindOfClass:NSString.class]||![object[@"assets"] isKindOfClass:NSDictionary.class]){if(error)*error=LBTMakeError(33,@"Wallpaper.plist missing identifier/name/assets");return @{@"status":@"incomplete",@"errors":@[@"Incomplete Wallpaper.plist"]};}
+                BOOL validID = [object isKindOfClass:NSDictionary.class] &&
+                    ([object[@"identifier"] isKindOfClass:NSNumber.class] ||
+                     ([object[@"identifier"] isKindOfClass:NSString.class] && [object[@"identifier"] length] > 0));
+                if(!validID || ![object[@"name"] isKindOfClass:NSString.class] || ![object[@"assets"] isKindOfClass:NSDictionary.class]){if(error)*error=LBTMakeError(33,@"Wallpaper.plist missing identifier/name/assets");return @{@"status":@"incomplete",@"errors":@[@"Incomplete Wallpaper.plist"]};}
                 [wallpapers addObject:e.name];
             }
         }
