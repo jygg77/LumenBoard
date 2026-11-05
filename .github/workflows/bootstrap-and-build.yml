@@ -2,7 +2,7 @@ name: Verify original bundle, import history, test and build rootless DEB
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/rootless-deb-installation]
     paths:
       - ".github/workflows/**"
       - "Makefile"

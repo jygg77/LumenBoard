@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
 #import "../../Daemon/LBPosterBoardInstaller.h"
+#import <sqlite3.h>
 #import <sys/stat.h>
 #import <unistd.h>
 
@@ -677,5 +678,45 @@
     XCTAssertEqualObjects(result[@"posterBoardRefreshRequested"], @NO);
     XCTAssertEqualObjects(result[@"posterBoardRefreshRequiresDeviceRestart"], @NO);
     XCTAssertEqualObjects([NSData dataWithContentsOfFile:preferencesPath], original);
+}
+
+- (void)testInstallsDescriptorAndRegistersInSQLiteWhenDatabaseExists {
+    NSString *storeRoot = [self.temporaryRoot stringByAppendingPathComponent:@"PosterBoard/59"];
+    NSError *dirError = nil;
+    XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:storeRoot withIntermediateDirectories:YES attributes:nil error:&dirError]);
+    NSString *dbPath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
+
+    sqlite3 *db = NULL;
+    XCTAssertEqual(sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL), SQLITE_OK);
+    sqlite3_exec(db, "CREATE TABLE poster (UUID TEXT PRIMARY KEY, providerId TEXT);", NULL, NULL, NULL);
+    sqlite3_exec(db, "CREATE TABLE posterRoleMembership (posterUUID TEXT, roleId TEXT, roleSortKey INTEGER, PRIMARY KEY (posterUUID, roleId));", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO posterRoleMembership (posterUUID, roleId, roleSortKey) VALUES ('EXISTING-UUID', 'PRPosterRoleLockScreen', 10);", NULL, NULL, NULL);
+    sqlite3_close(db);
+
+    NSString *input = [self makeDescriptorGroupWithNames:@[@"SQLite test wallpaper"] missingFiles:[NSSet set]];
+    NSDictionary *result = [self install:input];
+    XCTAssertEqualObjects(result[@"installedDescriptorCount"], @1);
+    XCTAssertEqualObjects(result[@"sqliteDatabaseUpdated"], @YES);
+    XCTAssertEqualObjects(result[@"verificationScope"], @"filesystem-and-sqlite-registered");
+
+    NSString *uuid = [result[@"installedDescriptorIdentifiers"] firstObject];
+    XCTAssertNotNil(uuid);
+
+    XCTAssertEqual(sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READONLY, NULL), SQLITE_OK);
+    sqlite3_stmt *stmt = NULL;
+    XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT roleSortKey FROM posterRoleMembership WHERE posterUUID = ? AND roleId = 'PRPosterRoleLockScreen';", -1, &stmt, NULL), SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, uuid.UTF8String, -1, SQLITE_STATIC);
+    XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW);
+    int sortKey = sqlite3_column_int(stmt, 0);
+    XCTAssertEqual(sortKey, 11);
+    sqlite3_finalize(stmt);
+
+    XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT providerId FROM poster WHERE UUID = ?;", -1, &stmt, NULL), SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, uuid.UTF8String, -1, SQLITE_STATIC);
+    XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW);
+    const char *provider = (const char *)sqlite3_column_text(stmt, 0);
+    XCTAssertEqualObjects([NSString stringWithUTF8String:provider], @"com.apple.WallpaperKit.CollectionsPoster");
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
 }
 @end

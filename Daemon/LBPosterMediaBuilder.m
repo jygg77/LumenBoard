@@ -8,6 +8,8 @@
 #import <math.h>
 #import <stdlib.h>
 
+static const uint64_t LBMaxCumulativeVideoAssetBytes = 80ULL * 1024ULL * 1024ULL;
+
 static NSError *LBMediaError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:@"com.iuyghi.LumenBoard.MediaBuilder" code:code
         userInfo:@{NSLocalizedDescriptionKey:message ?: @"Media wallpaper generation failed."}];
@@ -104,6 +106,7 @@ static BOOL LBMediaWriteJPEG(UIImage *image, NSString *path, CGFloat quality, NS
         AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:asset];
         generator.appliesPreferredTrackTransform = YES;
         generator.maximumSize = CGSizeMake(1290, 2796);
+        uint64_t cumulativeBytes = 0;
         for (NSInteger index = 0; index < frames; index++) @autoreleasepool {
             CMTime time = CMTimeMakeWithSeconds((double)index / (double)fps, 600);
             NSError *frameError = nil;
@@ -119,7 +122,16 @@ static BOOL LBMediaWriteJPEG(UIImage *image, NSString *path, CGFloat quality, NS
                 frame = blurredFrame;
             }
             NSString *name = [NSString stringWithFormat:@"%ld.jpg", (long)index];
-            if (!LBMediaWriteJPEG(frame, [assets stringByAppendingPathComponent:name], 0.82, error)) return NO;
+            NSString *framePath = [assets stringByAppendingPathComponent:name];
+            if (!LBMediaWriteJPEG(frame, framePath, 0.82, error)) return NO;
+            struct stat frameStat;
+            if (lstat(framePath.fileSystemRepresentation, &frameStat) == 0) {
+                cumulativeBytes += (uint64_t)frameStat.st_size;
+                if (cumulativeBytes > LBMaxCumulativeVideoAssetBytes) {
+                    if (error) *error = LBMediaError(25, [NSString stringWithFormat:@"Cumulative video asset size exceeded %llu MiB safety budget.", LBMaxCumulativeVideoAssetBytes / (1024ULL * 1024ULL)]);
+                    return NO;
+                }
+            }
             [names addObject:name];
         }
     } else if ([kind isEqualToString:@"image"]) {

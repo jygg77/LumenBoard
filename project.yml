@@ -28,6 +28,7 @@ targets:
       - sdk: Foundation.framework
       - sdk: XCTest.framework
       - sdk: libz.tbd
+      - sdk: libsqlite3.tbd
 schemes:
   LumenBoardNativeTests:
     build:

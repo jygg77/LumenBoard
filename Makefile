@@ -11,7 +11,7 @@ TOOL_NAME = lumenboardd
 lumenboardd_FILES = Daemon/main.m Daemon/LBPosterBoardInstaller.m Daemon/LBPosterMediaBuilder.m Preferences/LBTendiesValidator.m Shared/LBPaths.m
 lumenboardd_CFLAGS = -fobjc-arc -Wall -Wextra
 lumenboardd_FRAMEWORKS = Foundation CoreFoundation UIKit AVFoundation CoreImage CoreGraphics
-lumenboardd_LIBRARIES = z
+lumenboardd_LIBRARIES = z sqlite3
 lumenboardd_INSTALL_PATH = /usr/libexec
 include $(THEOS_MAKE_PATH)/tool.mk
 

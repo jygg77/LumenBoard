@@ -1,5 +1,6 @@
 #import "LBPosterBoardInstaller.h"
 #import "../Preferences/LBTendiesValidator.h"
+#import <sqlite3.h>
 #import <sys/stat.h>
 #import <sys/types.h>
 #import <fcntl.h>
@@ -774,6 +775,167 @@ static BOOL LBReadExistingNumericIdentifiers(NSString *descriptorRoot,
     return YES;
 }
 
+static BOOL LBRegisterDescriptorsInSQLiteDatabase(NSString *dbPath,
+                                                 NSArray<NSString *> *uuids,
+                                                 NSString *providerId,
+                                                 NSError **error) {
+    if (!uuids.count) return YES;
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+    if (rc != SQLITE_OK) {
+        if (error) *error = LBInstallError(70, [NSString stringWithFormat:@"Cannot open PosterBoard SQLite database: %s", db ? sqlite3_errmsg(db) : "unknown error"]);
+        if (db) sqlite3_close(db);
+        return NO;
+    }
+
+    sqlite3_busy_timeout(db, 5000);
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+
+    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS poster (UUID TEXT PRIMARY KEY, providerId TEXT);", NULL, NULL, NULL);
+    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS posterRoleMembership (posterUUID TEXT, roleId TEXT, roleSortKey INTEGER, PRIMARY KEY (posterUUID, roleId));", NULL, NULL, NULL);
+
+    char *errMsg = NULL;
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, &errMsg);
+    if (rc != SQLITE_OK) {
+        if (error) *error = LBInstallError(71, [NSString stringWithFormat:@"Cannot begin transaction on PosterBoard database: %s", errMsg ?: "unknown"]);
+        if (errMsg) sqlite3_free(errMsg);
+        sqlite3_close(db);
+        return NO;
+    }
+
+    int nextSortKey = 1;
+    sqlite3_stmt *sortStmt = NULL;
+    const char *sortSql = "SELECT COALESCE(MAX(roleSortKey), 0) + 1 FROM posterRoleMembership WHERE roleId = 'PRPosterRoleLockScreen';";
+    if (sqlite3_prepare_v2(db, sortSql, -1, &sortStmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(sortStmt) == SQLITE_ROW) {
+            nextSortKey = sqlite3_column_int(sortStmt, 0);
+        }
+        sqlite3_finalize(sortStmt);
+    }
+
+    BOOL ok = YES;
+    const char *posterSql = "INSERT OR REPLACE INTO poster (UUID, providerId) VALUES (?, ?);";
+    const char *roleSql = "INSERT OR REPLACE INTO posterRoleMembership (posterUUID, roleId, roleSortKey) VALUES (?, 'PRPosterRoleLockScreen', ?);";
+
+    sqlite3_stmt *posterStmt = NULL;
+    sqlite3_stmt *roleStmt = NULL;
+
+    if (sqlite3_prepare_v2(db, posterSql, -1, &posterStmt, NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(db, roleSql, -1, &roleStmt, NULL) != SQLITE_OK) {
+        if (error) *error = LBInstallError(72, [NSString stringWithFormat:@"Cannot prepare SQL statements: %s", sqlite3_errmsg(db)]);
+        ok = NO;
+    }
+
+    if (ok) {
+        for (NSString *uuid in uuids) {
+            sqlite3_reset(posterStmt);
+            sqlite3_bind_text(posterStmt, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(posterStmt, 2, providerId.UTF8String, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(posterStmt) != SQLITE_DONE) {
+                if (error) *error = LBInstallError(73, [NSString stringWithFormat:@"Failed inserting poster %@: %s", uuid, sqlite3_errmsg(db)]);
+                ok = NO;
+                break;
+            }
+
+            sqlite3_reset(roleStmt);
+            sqlite3_bind_text(roleStmt, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(roleStmt, 2, nextSortKey++);
+            if (sqlite3_step(roleStmt) != SQLITE_DONE) {
+                if (error) *error = LBInstallError(74, [NSString stringWithFormat:@"Failed inserting posterRoleMembership %@: %s", uuid, sqlite3_errmsg(db)]);
+                ok = NO;
+                break;
+            }
+        }
+    }
+
+    if (posterStmt) sqlite3_finalize(posterStmt);
+    if (roleStmt) sqlite3_finalize(roleStmt);
+
+    if (ok) {
+        rc = sqlite3_exec(db, "COMMIT;", NULL, NULL, &errMsg);
+        if (rc != SQLITE_OK) {
+            if (error) *error = LBInstallError(75, [NSString stringWithFormat:@"Cannot commit PosterBoard SQLite transaction: %s", errMsg ?: "unknown"]);
+            if (errMsg) sqlite3_free(errMsg);
+            sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+            ok = NO;
+        }
+    } else {
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    }
+
+    sqlite3_close(db);
+
+    if (ok) {
+        struct passwd *mobile = getpwnam("mobile");
+        if (mobile && geteuid() == 0) {
+            chown(dbPath.fileSystemRepresentation, mobile->pw_uid, mobile->pw_gid);
+            NSString *wal = [dbPath stringByAppendingString:@"-wal"];
+            NSString *shm = [dbPath stringByAppendingString:@"-shm"];
+            struct stat s;
+            if (lstat(wal.fileSystemRepresentation, &s) == 0) chown(wal.fileSystemRepresentation, mobile->pw_uid, mobile->pw_gid);
+            if (lstat(shm.fileSystemRepresentation, &s) == 0) chown(shm.fileSystemRepresentation, mobile->pw_uid, mobile->pw_gid);
+        }
+    }
+
+    return ok;
+}
+
+static void LBRollbackDescriptorsInSQLiteDatabase(NSString *dbPath, NSArray<NSString *> *uuids) {
+    if (!uuids.count) return;
+    struct stat s;
+    if (lstat(dbPath.fileSystemRepresentation, &s) != 0 || !S_ISREG(s.st_mode)) return;
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return;
+    }
+    sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
+    sqlite3_stmt *delRole = NULL;
+    sqlite3_stmt *delPoster = NULL;
+    sqlite3_prepare_v2(db, "DELETE FROM posterRoleMembership WHERE posterUUID = ?;", -1, &delRole, NULL);
+    sqlite3_prepare_v2(db, "DELETE FROM poster WHERE UUID = ?;", -1, &delPoster, NULL);
+    for (NSString *uuid in uuids) {
+        if (delRole) {
+            sqlite3_reset(delRole);
+            sqlite3_bind_text(delRole, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+            sqlite3_step(delRole);
+        }
+        if (delPoster) {
+            sqlite3_reset(delPoster);
+            sqlite3_bind_text(delPoster, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+            sqlite3_step(delPoster);
+        }
+    }
+    if (delRole) sqlite3_finalize(delRole);
+    if (delPoster) sqlite3_finalize(delPoster);
+    sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+    sqlite3_close(db);
+}
+
+static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray<NSString *> *uuids) {
+    if (!uuids.count) return 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT COUNT(*) FROM posterRoleMembership WHERE posterUUID = ? AND roleId = 'PRPosterRoleLockScreen';";
+    NSUInteger count = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        for (NSString *uuid in uuids) {
+            sqlite3_reset(stmt);
+            sqlite3_bind_text(stmt, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                if (sqlite3_column_int(stmt, 0) > 0) count++;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    return count;
+}
+
 @implementation LBPosterBoardInstaller
 
 // Private, deterministic compatibility seam used by the macOS XCTest suite.
@@ -860,9 +1022,18 @@ static BOOL LBReadExistingNumericIdentifiers(NSString *descriptorRoot,
     else if (missing.count && present.count) state = @"partial";
     else if (missing.count) state = @"missing";
 
+    NSString *storeRoot = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore/59"];
+    NSString *sqlitePath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
+    struct stat sStat;
+    BOOL sqliteExists = (lstat(sqlitePath.fileSystemRepresentation, &sStat) == 0 && S_ISREG(sStat.st_mode) && !S_ISLNK(sStat.st_mode));
+    NSUInteger sqliteFoundCount = 0;
+    if (sqliteExists) {
+        sqliteFoundCount = LBCountRegisteredDescriptorsInSQLite(sqlitePath, identifiers);
+    }
+
     return @{
         @"descriptorStoreState": state,
-        @"verificationScope": @"filesystem-registration-only",
+        @"verificationScope": sqliteExists ? @"filesystem-and-sqlite-verified" : @"filesystem-registration-only",
         @"posterBoardApplicationState": @"unverified",
         @"expectedDescriptorCount": @(identifiers.count),
         @"presentDescriptorCount": @(present.count),
@@ -872,7 +1043,9 @@ static BOOL LBReadExistingNumericIdentifiers(NSString *descriptorRoot,
         @"missingDescriptorIdentifiers": missing,
         @"invalidDescriptors": invalid,
         @"descriptorStructureVersion": @(LBExpectedStructureVersion),
-        @"extension": LBCollectionsExtension
+        @"extension": LBCollectionsExtension,
+        @"sqliteDatabasePresent": @(sqliteExists),
+        @"sqliteRegisteredCount": @(sqliteFoundCount)
     };
 }
 
@@ -997,26 +1170,49 @@ static BOOL LBReadExistingNumericIdentifiers(NSString *descriptorRoot,
             }
         }
     }
+
+    BOOL sqliteUpdated = NO;
+    NSString *storeRoot = descriptorRoot.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent;
+    NSString *sqlitePath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
+    struct stat sqliteStat;
+    BOOL sqliteExists = (lstat(sqlitePath.fileSystemRepresentation, &sqliteStat) == 0 && S_ISREG(sqliteStat.st_mode) && !S_ISLNK(sqliteStat.st_mode));
+
+    if (success && sqliteExists) {
+        if (!LBRegisterDescriptorsInSQLiteDatabase(sqlitePath, publishedIdentifiers, LBCollectionsExtension, &localError)) {
+            success = NO;
+        } else {
+            sqliteUpdated = YES;
+        }
+    }
+
     if (!success) {
         // Roll back only directories this invocation actually published. Never
         // delete a colliding path that appeared concurrently.
         for (NSString *path in committedPaths.reverseObjectEnumerator) {
             if (LBIsDirectory(path)) [NSFileManager.defaultManager removeItemAtPath:path error:nil];
         }
+        if (sqliteExists && sqliteUpdated) {
+            LBRollbackDescriptorsInSQLiteDatabase(sqlitePath, publishedIdentifiers);
+        }
         [NSFileManager.defaultManager removeItemAtPath:stagingRoot error:nil];
         if (error) *error = localError ?: LBInstallError(63, @"Descriptor publication failed and was rolled back.");
         return nil;
     }
     [NSFileManager.defaultManager removeItemAtPath:stagingRoot error:nil];
-    return @{
+    NSMutableDictionary *resultReport = [@{
         @"installedDescriptorIdentifiers": publishedIdentifiers,
         @"installedDescriptorCount": @(publishedIdentifiers.count),
         @"descriptorStructureVersion": @(LBExpectedStructureVersion),
         @"extension": LBCollectionsExtension,
         @"descriptorStoreVerified": @YES,
-        @"verificationScope": @"filesystem-registration-only",
+        @"verificationScope": sqliteUpdated ? @"filesystem-and-sqlite-registered" : @"filesystem-registration-only",
+        @"sqliteDatabaseUpdated": @(sqliteUpdated),
         @"posterBoardApplicationState": @"unverified"
-    };
+    } mutableCopy];
+    if (sqliteExists) {
+        resultReport[@"sqliteDatabasePath"] = sqlitePath;
+    }
+    return resultReport;
 }
 
 
