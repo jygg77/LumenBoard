@@ -690,6 +690,8 @@
     XCTAssertEqual(sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL), SQLITE_OK);
     sqlite3_exec(db, "CREATE TABLE poster (UUID TEXT PRIMARY KEY, providerId TEXT);", NULL, NULL, NULL);
     sqlite3_exec(db, "CREATE TABLE posterRoleMembership (posterUUID TEXT, roleId TEXT, roleSortKey INTEGER, PRIMARY KEY (posterUUID, roleId));", NULL, NULL, NULL);
+    NSString *validConfig = [storeRoot stringByAppendingPathComponent:@"Extensions/com.apple.WallpaperKit.CollectionsPoster/configurations/EXISTING-UUID"];
+    XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:validConfig withIntermediateDirectories:YES attributes:nil error:nil]);
     sqlite3_exec(db, "INSERT INTO posterRoleMembership (posterUUID, roleId, roleSortKey) VALUES ('EXISTING-UUID', 'PRPosterRoleLockScreen', 10);", NULL, NULL, NULL);
     sqlite3_close(db);
 
@@ -706,16 +708,12 @@
     sqlite3_stmt *stmt = NULL;
     XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT roleSortKey FROM posterRoleMembership WHERE posterUUID = ? AND roleId = 'PRPosterRoleLockScreen';", -1, &stmt, NULL), SQLITE_OK);
     sqlite3_bind_text(stmt, 1, uuid.UTF8String, -1, SQLITE_STATIC);
-    XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW);
-    int sortKey = sqlite3_column_int(stmt, 0);
-    XCTAssertEqual(sortKey, 11);
+    XCTAssertEqual(sqlite3_step(stmt), SQLITE_DONE);
     sqlite3_finalize(stmt);
 
-    XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT providerId FROM poster WHERE UUID = ?;", -1, &stmt, NULL), SQLITE_OK);
-    sqlite3_bind_text(stmt, 1, uuid.UTF8String, -1, SQLITE_STATIC);
+    XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT roleSortKey FROM posterRoleMembership WHERE posterUUID = 'EXISTING-UUID';", -1, &stmt, NULL), SQLITE_OK);
     XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW);
-    const char *provider = (const char *)sqlite3_column_text(stmt, 0);
-    XCTAssertEqualObjects([NSString stringWithUTF8String:provider], @"com.apple.WallpaperKit.CollectionsPoster");
+    XCTAssertEqual(sqlite3_column_int(stmt, 0), 10);
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 }

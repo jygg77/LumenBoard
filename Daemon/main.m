@@ -361,6 +361,17 @@ static NSDictionary *LBProcessMediaInstallRequest(NSDictionary *request, NSError
     return report;
 }
 
+static NSDictionary *LBProcessRefreshRequest(__unused NSDictionary *request, NSError **error) {
+    NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:error];
+    if (!container) return nil;
+    NSDictionary *refresh = [LBPosterBoardInstaller requestPosterBoardRefreshForContainer:container];
+    BOOL restarted = LBRestartPosterBoard();
+    NSMutableDictionary *report = [refresh mutableCopy];
+    report[@"refreshCommandAttempted"] = @YES;
+    report[@"posterBoardRefreshRequested"] = @(restarted);
+    return report;
+}
+
 static void LBProcessRequests(void) {
     [LBRequestLock lock];
     @try {
@@ -404,6 +415,8 @@ static void LBProcessRequests(void) {
                 operationResult = LBVerifyManagedTendiesRegistration(request, &operationError);
             } else if ([action isEqualToString:@"install-media"]) {
                 operationResult = LBProcessMediaInstallRequest(request, &operationError);
+            } else if ([action isEqualToString:@"refresh-posterboard"]) {
+                operationResult = LBProcessRefreshRequest(request, &operationError);
             } else {
                 operationError = [NSError errorWithDomain:@"com.iuyghi.LumenBoard.Daemon" code:110 userInfo:@{NSLocalizedDescriptionKey:@"Unsupported daemon action."}];
             }

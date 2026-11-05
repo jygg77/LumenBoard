@@ -1029,6 +1029,65 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
     return count;
 }
 
+static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeRoot) {
+    if (!dbPath.length || !storeRoot.length) return;
+    struct stat st;
+    if (lstat(dbPath.fileSystemRepresentation, &st) != 0 || !S_ISREG(st.st_mode)) return;
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return;
+    }
+    sqlite3_busy_timeout(db, 3000);
+    sqlite3_stmt *stmt = NULL;
+    const char *query = "SELECT posterUUID FROM posterRoleMembership WHERE roleId = 'PRPosterRoleLockScreen';";
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) == SQLITE_OK) {
+        NSMutableArray<NSString *> *staleUUIDs = [NSMutableArray array];
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *rawUUID = (const char *)sqlite3_column_text(stmt, 0);
+            if (!rawUUID) continue;
+            NSString *uuid = [NSString stringWithUTF8String:rawUUID];
+            NSString *extDir = [storeRoot stringByAppendingPathComponent:@"Extensions"];
+            BOOL configExists = NO;
+            for (NSString *ext in [NSFileManager.defaultManager contentsOfDirectoryAtPath:extDir error:nil] ?: @[]) {
+                NSString *configPath = [[[extDir stringByAppendingPathComponent:ext] stringByAppendingPathComponent:@"configurations"] stringByAppendingPathComponent:uuid];
+                if (LBIsDirectory(configPath)) {
+                    configExists = YES;
+                    break;
+                }
+            }
+            if (!configExists) {
+                [staleUUIDs addObject:uuid];
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        if (staleUUIDs.count > 0) {
+            sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
+            sqlite3_stmt *delRole = NULL;
+            sqlite3_stmt *delPoster = NULL;
+            sqlite3_prepare_v2(db, "DELETE FROM posterRoleMembership WHERE posterUUID = ?;", -1, &delRole, NULL);
+            sqlite3_prepare_v2(db, "DELETE FROM poster WHERE UUID = ?;", -1, &delPoster, NULL);
+            for (NSString *uuid in staleUUIDs) {
+                if (delRole) {
+                    sqlite3_reset(delRole);
+                    sqlite3_bind_text(delRole, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+                    sqlite3_step(delRole);
+                }
+                if (delPoster) {
+                    sqlite3_reset(delPoster);
+                    sqlite3_bind_text(delPoster, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+                    sqlite3_step(delPoster);
+                }
+            }
+            if (delRole) sqlite3_finalize(delRole);
+            if (delPoster) sqlite3_finalize(delPoster);
+            sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+        }
+    }
+    sqlite3_close(db);
+}
+
 @implementation LBPosterBoardInstaller
 
 // Private, deterministic compatibility seam used by the macOS XCTest suite.
@@ -1044,18 +1103,21 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
 }
 
 + (NSString *)findPosterBoardContainer:(NSError **)error {
-    NSString *base = @"/var/mobile/Containers/Data/Application";
-    if (!LBIsDirectory(base)) {
-        if (error) *error = LBInstallError(50, @"The iOS application-container root is not available.");
-        return nil;
-    }
-    for (NSString *entry in [NSFileManager.defaultManager contentsOfDirectoryAtPath:base error:nil] ?: @[]) {
-        NSString *candidate = [base stringByAppendingPathComponent:entry];
-        if (!LBIsDirectory(candidate)) continue;
-        NSString *metadataPath = [candidate stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
-        if (!LBIsRegularFile(metadataPath)) continue;
-        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        if ([metadata[@"MCMMetadataIdentifier"] isEqual:@"com.apple.PosterBoard"]) return candidate;
+    NSArray<NSString *> *roots = @[
+        @"/var/mobile/Containers/Data/Application",
+        @"/var/mobile/Containers/Data/InternalDaemon",
+        @"/var/mobile/Containers/Data/PluginKitPlugin"
+    ];
+    for (NSString *base in roots) {
+        if (!LBIsDirectory(base)) continue;
+        for (NSString *entry in [NSFileManager.defaultManager contentsOfDirectoryAtPath:base error:nil] ?: @[]) {
+            NSString *candidate = [base stringByAppendingPathComponent:entry];
+            if (!LBIsDirectory(candidate)) continue;
+            NSString *metadataPath = [candidate stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+            if (!LBIsRegularFile(metadataPath)) continue;
+            NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+            if ([metadata[@"MCMMetadataIdentifier"] isEqual:@"com.apple.PosterBoard"]) return candidate;
+        }
     }
     if (error) *error = LBInstallError(51, @"PosterBoard app data container was not found by MCMMetadataIdentifier.");
     return nil;
@@ -1257,6 +1319,7 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
                 success = NO;
                 break;
             }
+            chmod(destination.fileSystemRepresentation, 0775);
             [committedPaths addObject:destination];
         }
     }
@@ -1281,11 +1344,14 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
     BOOL sqliteExists = (lstat(sqlitePath.fileSystemRepresentation, &sqliteStat) == 0 && S_ISREG(sqliteStat.st_mode) && !S_ISLNK(sqliteStat.st_mode));
 
     if (success && sqliteExists) {
-        if (!LBRegisterDescriptorsInSQLiteDatabase(sqlitePath, publishedIdentifiers, LBCollectionsExtension, &localError)) {
-            success = NO;
-        } else {
-            sqliteUpdated = YES;
-        }
+        // In PosterBoard's architecture on iOS 16, descriptor blueprints live exclusively
+        // in descriptors/ (for Add Wallpaper -> Collections) and MUST NOT be registered
+        // in posterRoleMembership (which is strictly for active lockscreen configurations
+        // in configurations/). Registering descriptors in posterRoleMembership causes
+        // PosterBoard to fail when looking for missing configurations/ folders.
+        // We prune any stale or accidentally registered descriptor UUIDs from SQLite.
+        LBCleanupStalePosterBoardDatabase(sqlitePath, storeRoot);
+        sqliteUpdated = YES;
     }
 
     if (!success) {
@@ -1379,18 +1445,22 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
 
         preferences[@"PBF_LOCALE_DID_CHANGE"] = @NO;
         preferences[@"PBF_RESET_FILE_PROTECTIONS"] = @YES;
-        preferences[@"PersistedPosterContainerBundleIdentifiers"] = @[
-            @"com.apple.Posters.CollectionsPosterApp",
-            @"com.apple.WallpaperKit.CollectionsPoster"
-        ];
-        preferences[@"CompletedPosterBundleIdentifierMigrations"] = @[
-            @"com.apple.Posters.UnityPosterApp.ExtragalacticPoster",
-            @"com.apple.Posters.WeatherPosterApp.WeatherPoster",
-            @"com.apple.Posters.UnityPosterApp.Unity2025Poster",
-            @"com.apple.Posters.UnityPosterApp.UnityPosterExtension",
-            @"com.apple.Posters.UnityPosterApp.RhizomePoster",
-            @"com.apple.Posters.KaleidoscopePosterApp.KaleidoscopePoster"
-        ];
+        [preferences removeObjectForKey:@"PersistedPosterContainerBundleIdentifiers"];
+        [preferences removeObjectForKey:@"CompletedPosterBundleIdentifierMigrations"];
+
+        // Clear the cached snapshot index so PosterBoard is forced to re-read
+        // all descriptors under Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors
+        NSString *storeRoot = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore/59"];
+        NSString *galleryIndex = [storeRoot stringByAppendingPathComponent:@"PRPosterRoleLockScreen-gallery-index.json"];
+        struct stat giStat;
+        if (lstat(galleryIndex.fileSystemRepresentation, &giStat) == 0 && S_ISREG(giStat.st_mode)) {
+            [NSFileManager.defaultManager removeItemAtPath:galleryIndex error:nil];
+        }
+        NSString *sqlitePath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
+        struct stat sqStat;
+        if (lstat(sqlitePath.fileSystemRepresentation, &sqStat) == 0 && S_ISREG(sqStat.st_mode)) {
+            LBCleanupStalePosterBoardDatabase(sqlitePath, storeRoot);
+        }
         NSError *serializationError = nil;
         NSData *data = [NSPropertyListSerialization dataWithPropertyList:preferences
             format:NSPropertyListBinaryFormat_v1_0 options:0 error:&serializationError];
@@ -1462,4 +1532,21 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
     }
     return result;
 }
+
++ (BOOL)removeDescriptorIdentifiers:(NSArray<NSString *> *)identifiers
+              posterBoardContainer:(NSString *)containerPath
+                             error:(NSError **)error {
+    if (!identifiers.count || !LBIsDirectory(containerPath)) return YES;
+    NSString *descriptorRoot = [[containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore/59/Extensions"] stringByAppendingPathComponent:[LBCollectionsExtension stringByAppendingPathComponent:@"descriptors"]];
+    for (NSString *uuid in identifiers) {
+        if (![uuid isKindOfClass:NSString.class] || !uuid.length) continue;
+        NSString *path = [descriptorRoot stringByAppendingPathComponent:uuid];
+        if (LBIsDirectory(path)) {
+            [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        }
+    }
+    [self requestPosterBoardRefreshForContainer:containerPath];
+    return YES;
+}
+
 @end

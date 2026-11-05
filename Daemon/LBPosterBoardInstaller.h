@@ -33,6 +33,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Resolves the PosterBoard app data container using its MCM metadata identifier.
 + (nullable NSString *)findPosterBoardContainer:(NSError * _Nullable * _Nullable)error;
 
+/// Removes published descriptor directories from PosterBoard and triggers a refresh.
++ (BOOL)removeDescriptorIdentifiers:(NSArray<NSString *> *)identifiers
+              posterBoardContainer:(NSString *)containerPath
+                             error:(NSError * _Nullable * _Nullable)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

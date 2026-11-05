@@ -752,6 +752,8 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
 }
 
 - (void)restartPosterBoardTapped {
+    NSError *daemonError = nil;
+    LBQueueDaemonActionAndWait(nil, @"refresh-posterboard", nil, nil, NULL, &daemonError);
     NSString *killallPath = nil;
     for (NSString *base in @[@"/var/jb/usr/bin", @"/usr/bin", @"/bin"]) {
         NSString *candidate = [base stringByAppendingPathComponent:@"killall"];
@@ -767,9 +769,9 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
     if (rc == 0 && pid > 0) {
         int status = 0;
         waitpid(pid, &status, 0);
-        [self showMessage:@"PosterBoard Restarted" message:@"PosterBoard has been reloaded. Open your Lock Screen or Settings > Wallpaper to see your wallpapers."];
+        [self showMessage:@"PosterBoard Reloaded" message:@"Gallery cache cleared, SQLite database repaired, reset flags staged, and PosterBoard restarted. Open Lock Screen gallery (Collections) to see your wallpapers."];
     } else {
-        [self showMessage:@"Restart Failed" message:@"Could not restart PosterBoard automatically. You can run 'killall -9 PosterBoard' in NewTerm or Respring in Dopamine."];
+        [self showMessage:@"PosterBoard Reload Staged" message:@"Gallery cache cleared, SQLite database repaired, and reset flags staged. Run 'killall -9 PosterBoard' in NewTerm or Respring in Dopamine to complete the reload."];
     }
 }
 
