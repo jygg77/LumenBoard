@@ -13,6 +13,7 @@ import plistlib
 import re
 import stat
 import sys
+from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -106,9 +107,10 @@ def _check_asset_references(ca_dir: Path, report: dict[str, Any], label: str) ->
             report["errors"].append(f"{label}/{caml.name}: backslash-style asset reference is not accepted")
         for raw_ref in _reference_paths(text):
             try:
-                raw_parts = raw_ref.split("/")
-                rel = PurePosixPath(raw_ref)
-                if rel.is_absolute() or any(part in {"", ".", ".."} for part in raw_parts) or "\\" in raw_ref:
+                decoded_ref = unquote(raw_ref)
+                raw_parts = decoded_ref.split("/")
+                rel = PurePosixPath(decoded_ref)
+                if rel.is_absolute() or any(part in {"", ".", ".."} for part in raw_parts) or "\\" in decoded_ref:
                     report["errors"].append(f"{label}/{caml.name}: unsafe asset reference {raw_ref!r}")
                     continue
                 if not rel.parts or rel.parts[0] != "assets" or len(rel.parts) < 2:
@@ -235,8 +237,11 @@ def _validate_one(descriptor: Path, report: dict[str, Any], seen_descriptor_ids:
         if numeric_id is not None and representing_id is not None and isinstance(representing_id, str) and numeric_id != representing_id:
             report["errors"].append(f"{root_label}: root descriptor identifier and wallpaperRepresentingIdentifier differ")
 
+    ca_keys = ["backgroundAnimationFileName", "floatingAnimationFileNameKey"]
+    if isinstance(default, dict) and "foregroundAnimationFileName" in default:
+        ca_keys.append("foregroundAnimationFileName")
     ca_refs = []
-    for key in ("backgroundAnimationFileName", "floatingAnimationFileNameKey"):
+    for key in ca_keys:
         name = default.get(key)
         try:
             name = _safe_component(name, key)
@@ -267,12 +272,13 @@ def _validate_one(descriptor: Path, report: dict[str, Any], seen_descriptor_ids:
             except ConsistencyError as exc:
                 report["errors"].append(f"{root_label}/{wallpaper.name}/{name}: {exc}")
             manifest_name = index.get("assetManifest")
-            try:
-                manifest_name = _safe_component(manifest_name, "index.xml assetManifest")
-                if not (ca_dir / manifest_name).is_file():
-                    report["warnings"].append(f"{root_label}/{wallpaper.name}/{name}: index.xml assetManifest target is absent: {manifest_name}; device-side tolerance is unverified")
-            except ConsistencyError as exc:
-                report["errors"].append(f"{root_label}/{wallpaper.name}/{name}: {exc}")
+            if manifest_name is not None:
+                try:
+                    manifest_name = _safe_component(manifest_name, "index.xml assetManifest")
+                    if not (ca_dir / manifest_name).is_file():
+                        report["warnings"].append(f"{root_label}/{wallpaper.name}/{name}: index.xml assetManifest target is absent: {manifest_name}; device-side tolerance is unverified")
+                except ConsistencyError as exc:
+                    report["errors"].append(f"{root_label}/{wallpaper.name}/{name}: {exc}")
 
     if len(ca_refs) == 2 and ca_refs[0] == ca_refs[1]:
         report["warnings"].append(f"{root_label}: background and floating layers reference the same .ca bundle")

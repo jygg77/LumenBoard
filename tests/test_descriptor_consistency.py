@@ -188,6 +188,39 @@ class DescriptorConsistencyTests(unittest.TestCase):
         self.assertEqual(report["status"], "invalid")
         self.assertTrue(any("no descriptor directories" in issue for issue in report["errors"]))
 
+    def test_accepts_caml_layer_with_omitted_asset_manifest(self):
+        floating_ca = self.wallpaper / "PF_Floating.ca"
+        (floating_ca / "index.xml").write_bytes(plistlib.dumps({
+            "rootDocument": "main.caml",
+        }, fmt=plistlib.FMT_BINARY))
+        (floating_ca / "assetManifest.caml").unlink(missing_ok=True)
+        report = validator.validate_descriptors_root(self.root)
+        self.assertEqual(report["status"], "passes-structural-checks", report)
+        self.assertEqual(report["errors"], [])
+
+    def test_accepts_percent_encoded_caml_asset_references_with_spaces(self):
+        bg_ca = self.wallpaper / "PF_Background.ca"
+        (bg_ca / "main.caml").write_text('<document><image src="assets/my%20hero%20image.png"/></document>', encoding="utf-8")
+        (bg_ca / "assets" / "my hero image.png").write_bytes(b"image data")
+        report = validator.validate_descriptors_root(self.root)
+        self.assertEqual(report["status"], "passes-structural-checks", report)
+        self.assertEqual(report["errors"], [])
+
+    def test_accepts_foreground_layer_if_declared(self):
+        fg_ca = self.wallpaper / "PF_Foreground.ca"
+        fg_ca.mkdir(parents=True)
+        (fg_ca / "main.caml").write_text("<document/>", encoding="utf-8")
+        (fg_ca / "index.xml").write_bytes(plistlib.dumps({
+            "rootDocument": "main.caml",
+        }, fmt=plistlib.FMT_BINARY))
+        wplist_path = self.wallpaper / "Wallpaper.plist"
+        wplist = plistlib.loads(wplist_path.read_bytes())
+        wplist["assets"]["lockAndHome"]["default"]["foregroundAnimationFileName"] = "PF_Foreground.ca"
+        wplist_path.write_bytes(plistlib.dumps(wplist, fmt=plistlib.FMT_BINARY))
+        report = validator.validate_descriptors_root(self.root)
+        self.assertEqual(report["status"], "passes-structural-checks", report)
+        self.assertIn("PF_Foreground.ca", report["descriptors"][0]["ca_bundles"])
+
 
 if __name__ == "__main__":
     unittest.main()

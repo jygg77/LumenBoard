@@ -719,4 +719,54 @@
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 }
+
+- (void)testInstallsDescriptorWithOmittedAssetManifestInFloatingLayer {
+    NSString *input = [self makeDescriptorGroupWithNames:@[@"Omitted manifest wallpaper"] missingFiles:[NSSet set]];
+    NSString *floatingIndex = [input stringByAppendingPathComponent:@"descriptors/fixture-1/versions/1/contents/Fixture1.Custom.wallpaper/PF_Floating.ca/index.xml"];
+    NSDictionary *floatingDict = @{
+        @"rootDocument": @"main.caml",
+        @"documentHeight": @1,
+        @"documentWidth": @1
+    };
+    XCTAssertTrue([self writePlist:floatingDict toPath:floatingIndex]);
+    NSString *manifestPath = [input stringByAppendingPathComponent:@"descriptors/fixture-1/versions/1/contents/Fixture1.Custom.wallpaper/PF_Floating.ca/assetManifest.caml"];
+    [[NSFileManager defaultManager] removeItemAtPath:manifestPath error:nil];
+
+    NSDictionary *result = [self install:input];
+    XCTAssertEqualObjects(result[@"installedDescriptorCount"], @1);
+}
+
+- (void)testRewritesSuggestionMetadataIdentifierInSyncWithPublishedDescriptor {
+    NSString *input = [self makeDescriptorGroupWithNames:@[@"Suggestion metadata wallpaper"] missingFiles:[NSSet set]];
+    NSString *descRoot = [input stringByAppendingPathComponent:@"descriptors/fixture-1"];
+    NSString *suggestionPath = [descRoot stringByAppendingPathComponent:@"com.apple.posterkit.provider.identifierURL.suggestionMetadata.plist"];
+
+    NSDictionary *fakeKeyedArchive = @{
+        @"$archiver": @"NSKeyedArchiver",
+        @"$version": @100000,
+        @"$objects": @[
+            @"$null",
+            @"12345.DYNAMIC",
+            @"com.apple.WallpaperKit.CollectionsPoster"
+        ],
+        @"$top": @{@"root": @1}
+    };
+    XCTAssertTrue([self writePlist:fakeKeyedArchive toPath:suggestionPath]);
+
+    NSDictionary *result = [self install:input];
+    XCTAssertEqualObjects(result[@"installedDescriptorCount"], @1);
+
+    NSString *descriptorRoot = [self.temporaryRoot stringByAppendingPathComponent:@"PosterBoard/59/Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors"];
+    NSString *uuid = [result[@"installedDescriptorIdentifiers"] firstObject];
+    NSString *published = [descriptorRoot stringByAppendingPathComponent:uuid];
+    NSString *publishedID = [NSString stringWithContentsOfFile:[published stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"]
+        encoding:NSUTF8StringEncoding error:nil];
+    XCTAssertNotNil(publishedID);
+
+    NSString *publishedSuggestion = [published stringByAppendingPathComponent:@"com.apple.posterkit.provider.identifierURL.suggestionMetadata.plist"];
+    XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:publishedSuggestion]);
+    NSData *publishedData = [NSData dataWithContentsOfFile:publishedSuggestion];
+    NSString *expectedToken = [NSString stringWithFormat:@"%@.DYNAMIC", publishedID];
+    XCTAssertTrue([publishedData rangeOfData:[expectedToken dataUsingEncoding:NSUTF8StringEncoding] options:0 range:NSMakeRange(0, publishedData.length)].location != NSNotFound);
+}
 @end

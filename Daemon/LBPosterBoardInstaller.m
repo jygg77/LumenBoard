@@ -378,7 +378,21 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
                 if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing background/floating CAML bundles at %@", file]);
                 return NO;
             }
-            for (NSString *layerPath in @[backgroundPath, floatingPath]) {
+            NSMutableArray<NSString *> *layersToValidate = [NSMutableArray arrayWithObjects:backgroundPath, floatingPath, nil];
+            NSString *foregroundName = [defaults[@"foregroundAnimationFileName"] isKindOfClass:NSString.class] ? defaults[@"foregroundAnimationFileName"] : nil;
+            if (foregroundName.length) {
+                if (!LBPathIsSafeRelative(foregroundName)) {
+                    if (error) *error = LBInstallError(26, [NSString stringWithFormat:@"Invalid foreground layer reference at %@", file]);
+                    return NO;
+                }
+                NSString *foregroundPath = [wallpaperBundleRoot stringByAppendingPathComponent:foregroundName];
+                if (!LBIsDirectory(foregroundPath)) {
+                    if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing foreground CAML bundle at %@", file]);
+                    return NO;
+                }
+                [layersToValidate addObject:foregroundPath];
+            }
+            for (NSString *layerPath in layersToValidate) {
                 NSString *indexPath = [layerPath stringByAppendingPathComponent:@"index.xml"];
                 NSString *rootDocumentPath = [layerPath stringByAppendingPathComponent:@"main.caml"];
                 if (!LBIsRegularFile(indexPath) || !LBIsRegularFile(rootDocumentPath)) {
@@ -390,10 +404,12 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
                 NSPropertyListFormat indexFormat = NSPropertyListOpenStepFormat;
                 id indexObject = indexData ?
                     [NSPropertyListSerialization propertyListWithData:indexData options:NSPropertyListImmutable format:&indexFormat error:nil] : nil;
+                id assetManifest = [indexObject isKindOfClass:NSDictionary.class] ? indexObject[@"assetManifest"] : nil;
+                BOOL assetManifestValid = !assetManifest || [assetManifest isEqual:@"assetManifest.caml"];
                 if (![indexObject isKindOfClass:NSDictionary.class] ||
                     ![indexObject[@"rootDocument"] isEqual:@"main.caml"] ||
-                    ![indexObject[@"assetManifest"] isEqual:@"assetManifest.caml"]) {
-                    if (error) *error = LBInstallError(32, [NSString stringWithFormat:@"CAML index.xml is not a valid PosterBoard property list or does not reference main.caml and assetManifest.caml: %@", layerPath]);
+                    !assetManifestValid) {
+                    if (error) *error = LBInstallError(32, [NSString stringWithFormat:@"CAML index.xml is not a valid PosterBoard property list or does not reference main.caml: %@", layerPath]);
                     return NO;
                 }
             }
@@ -480,11 +496,88 @@ static BOOL LBValidatePublishedDescriptorIdentifierConsistency(NSString *root, N
     return YES;
 }
 
+static BOOL LBUpdateSuggestionMetadata(NSString *root, NSString *oldID, NSString *newID, NSError **error) {
+    NSString *suggestionPath = [root stringByAppendingPathComponent:@"com.apple.posterkit.provider.identifierURL.suggestionMetadata.plist"];
+    if (!LBIsRegularFile(suggestionPath)) return YES;
+
+    NSData *data = [NSData dataWithContentsOfFile:suggestionPath];
+    if (data.length < 32) return YES;
+    if (memcmp(data.bytes, "bplist00", 8) != 0) return YES;
+
+    NSString *oldDynamic = [NSString stringWithFormat:@"%@.DYNAMIC", oldID];
+    NSString *newDynamic = [NSString stringWithFormat:@"%@.DYNAMIC", newID];
+    NSData *targetData = nil;
+    NSData *replacementData = nil;
+
+    NSData *oldDynamicData = [oldDynamic dataUsingEncoding:NSUTF8StringEncoding];
+    NSRange range = [data rangeOfData:oldDynamicData options:0 range:NSMakeRange(0, data.length)];
+    if (range.location != NSNotFound) {
+        targetData = oldDynamicData;
+        replacementData = [newDynamic dataUsingEncoding:NSUTF8StringEncoding];
+    } else {
+        NSData *oldIDData = [oldID dataUsingEncoding:NSUTF8StringEncoding];
+        range = [data rangeOfData:oldIDData options:0 range:NSMakeRange(0, data.length)];
+        if (range.location != NSNotFound) {
+            targetData = oldIDData;
+            replacementData = [newID dataUsingEncoding:NSUTF8StringEncoding];
+        }
+    }
+
+    if (range.location == NSNotFound || !targetData || !replacementData) return YES;
+
+    NSMutableData *mutableData = [data mutableCopy];
+    if (targetData.length == replacementData.length) {
+        [mutableData replaceBytesInRange:range withBytes:replacementData.bytes length:replacementData.length];
+        return LBWriteDataAtomically(mutableData, suggestionPath, error);
+    }
+
+    NSInteger delta = (NSInteger)replacementData.length - (NSInteger)targetData.length;
+    NSUInteger prefixIdx = range.location - 1;
+    uint8_t *bytes = (uint8_t *)mutableData.mutableBytes;
+    if ((bytes[prefixIdx] & 0xF0) == 0x50 && replacementData.length < 15) {
+        bytes[prefixIdx] = (uint8_t)(0x50 | (replacementData.length & 0x0F));
+    }
+    [mutableData replaceBytesInRange:range withBytes:replacementData.bytes length:replacementData.length];
+
+    NSUInteger originalLen = data.length;
+    if (originalLen < 32) return YES;
+    const uint8_t *origTrailer = (const uint8_t *)data.bytes + (originalLen - 32);
+    uint8_t offsetIntSize = origTrailer[6];
+    uint64_t numObjs = 0;
+    for (int b = 0; b < 8; b++) numObjs = (numObjs << 8) | origTrailer[8 + b];
+    uint64_t offTableOff = 0;
+    for (int b = 0; b < 8; b++) offTableOff = (offTableOff << 8) | origTrailer[24 + b];
+
+    if (offsetIntSize == 2) {
+        uint64_t newOffTableOff = offTableOff + (uint64_t)delta;
+        uint8_t *mutBytes = (uint8_t *)mutableData.mutableBytes;
+        for (uint64_t i = 0; i < numObjs; i++) {
+            NSUInteger pos = (NSUInteger)(newOffTableOff + i * 2);
+            if (pos + 2 > mutableData.length) break;
+            uint16_t off = (mutBytes[pos] << 8) | mutBytes[pos + 1];
+            if (off > range.location) {
+                off = (uint16_t)((NSInteger)off + delta);
+                mutBytes[pos] = (uint8_t)(off >> 8);
+                mutBytes[pos + 1] = (uint8_t)(off & 0xFF);
+            }
+        }
+        NSUInteger trailerPos = mutableData.length - 8;
+        for (int b = 7; b >= 0; b--) {
+            mutBytes[trailerPos + (7 - b)] = (uint8_t)((newOffTableOff >> (b * 8)) & 0xFF);
+        }
+    }
+    return LBWriteDataAtomically(mutableData, suggestionPath, error);
+}
+
 static BOOL LBRewriteDescriptorIdentifiers(NSString *root, NSInteger numericID, NSError **error) {
     NSString *descriptorID = [NSString stringWithFormat:@"%ld", (long)numericID];
     NSData *idData = [descriptorID dataUsingEncoding:NSUTF8StringEncoding];
     NSString *rootIDPath = [root stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
+    NSString *oldIDText = LBReadTrimmedString(rootIDPath);
     if (!LBWriteDataAtomically(idData, rootIDPath, error)) return NO;
+    if (oldIDText.length && ![oldIDText isEqualToString:descriptorID]) {
+        if (!LBUpdateSuggestionMetadata(root, oldIDText, descriptorID, error)) return NO;
+    }
 
     NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:root];
     NSString *relative = nil;
@@ -1115,14 +1208,24 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
         }
         if (![NSFileManager.defaultManager copyItemAtPath:source toPath:staged error:&localError]) { success = NO; break; }
         NSInteger identifier = 0;
+        NSString *srcIDText = LBReadTrimmedString([source stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"]);
+        NSUInteger idLen = srcIDText.length > 0 ? srcIDText.length : 5;
+        NSInteger minCandidate = (idLen == 4) ? 1000 : 10000;
+        NSInteger maxCandidate = (idLen == 4) ? 9999 : 99999;
+        NSInteger rangeCandidate = maxCandidate - minCandidate + 1;
         if (orderedGroup) {
-            for (NSInteger candidate = 99999; candidate >= 10000; candidate--) {
+            for (NSInteger candidate = maxCandidate; candidate >= minCandidate; candidate--) {
                 if (![usedIDs containsObject:@(candidate)]) { identifier = candidate; break; }
             }
         } else {
-            for (NSUInteger attempt = 0; attempt < 1000; attempt++) {
-                NSInteger candidate = 10000 + arc4random_uniform(90000);
-                if (![usedIDs containsObject:@(candidate)]) { identifier = candidate; break; }
+            long long srcNumeric = [srcIDText longLongValue];
+            if (srcNumeric >= minCandidate && srcNumeric <= maxCandidate && ![usedIDs containsObject:@(srcNumeric)]) {
+                identifier = (NSInteger)srcNumeric;
+            } else {
+                for (NSUInteger attempt = 0; attempt < 1000; attempt++) {
+                    NSInteger candidate = minCandidate + arc4random_uniform((uint32_t)rangeCandidate);
+                    if (![usedIDs containsObject:@(candidate)]) { identifier = candidate; break; }
+                }
             }
         }
         if (!identifier) {
