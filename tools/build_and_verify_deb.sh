@@ -90,7 +90,7 @@ expected = {
     "CFBundleIdentifier": "com.iuyghi.lumenboard.preferences",
     "CFBundleExecutable": "LumenBoardPrefs",
     "CFBundlePackageType": "BNDL",
-    "CFBundleVersion": "17",
+    "CFBundleVersion": "18",
     "NSPrincipalClass": "LumenBoardRootListController",
 }
 for key, value in expected.items():
