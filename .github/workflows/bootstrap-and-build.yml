@@ -347,6 +347,7 @@ jobs:
           mapfile -t package_paths < <(dpkg-deb --contents "$DEB" | awk '{p=$NF; sub(/^\.\//, "", p); print p}')
           invalid_paths=()
           for package_path in "${package_paths[@]}"; do
+            [ -z "$package_path" ] && continue
             case "$package_path" in
               "."|"var"|"var/"|"var/jb"|"var/jb/"*) ;;
               *) invalid_paths+=("$package_path") ;;
