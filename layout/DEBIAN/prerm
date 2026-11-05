@@ -20,4 +20,8 @@ stop_service() {
 # Stop both the current service and any registration left by older packages.
 stop_service "$SERVICE"
 stop_service "$LEGACY_SERVICE"
+
+# Reload Preferences and PosterBoard
+killall -9 Preferences PosterBoard >/dev/null 2>&1 || true
+
 exit 0

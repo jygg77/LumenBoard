@@ -1379,6 +1379,18 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
 
         preferences[@"PBF_LOCALE_DID_CHANGE"] = @NO;
         preferences[@"PBF_RESET_FILE_PROTECTIONS"] = @YES;
+        preferences[@"PersistedPosterContainerBundleIdentifiers"] = @[
+            @"com.apple.Posters.CollectionsPosterApp",
+            @"com.apple.WallpaperKit.CollectionsPoster"
+        ];
+        preferences[@"CompletedPosterBundleIdentifierMigrations"] = @[
+            @"com.apple.Posters.UnityPosterApp.ExtragalacticPoster",
+            @"com.apple.Posters.WeatherPosterApp.WeatherPoster",
+            @"com.apple.Posters.UnityPosterApp.Unity2025Poster",
+            @"com.apple.Posters.UnityPosterApp.UnityPosterExtension",
+            @"com.apple.Posters.UnityPosterApp.RhizomePoster",
+            @"com.apple.Posters.KaleidoscopePosterApp.KaleidoscopePoster"
+        ];
         NSError *serializationError = nil;
         NSData *data = [NSPropertyListSerialization dataWithPropertyList:preferences
             format:NSPropertyListBinaryFormat_v1_0 options:0 error:&serializationError];
@@ -1422,6 +1434,15 @@ static NSUInteger LBCountRegisteredDescriptorsInSQLite(NSString *dbPath, NSArray
             savedErrno = errno ?: EPERM;
             failureReason = @"PosterBoard preference ownership or file type could not be verified after writing.";
             break;
+        }
+        NSString *mobilePrefs = @"/var/mobile/Library/Preferences/com.apple.PosterBoard.unprotectedUserDefaults.plist";
+        struct stat mobilePrefsDirStat;
+        if (lstat("/var/mobile/Library/Preferences", &mobilePrefsDirStat) == 0 && S_ISDIR(mobilePrefsDirStat.st_mode) && !S_ISLNK(mobilePrefsDirStat.st_mode)) {
+            LBWriteDataAtomically(data, mobilePrefs, NULL);
+            if (mobile && (geteuid() == 0 || geteuid() == mobile->pw_uid)) {
+                chown(mobilePrefs.fileSystemRepresentation, mobile->pw_uid, mobile->pw_gid);
+            }
+            chmod(mobilePrefs.fileSystemRepresentation, 0644);
         }
         written = YES;
     } while (0);

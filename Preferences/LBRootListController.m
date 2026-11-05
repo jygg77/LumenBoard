@@ -6,7 +6,11 @@
 #import <sys/stat.h>
 #import <unistd.h>
 #import <errno.h>
+#import <spawn.h>
+#import <sys/wait.h>
 #import <CoreFoundation/CoreFoundation.h>
+
+extern char **environ;
 
 static NSString * const LBManifestName = @"manifest.plist";
 static const unsigned long long LBMaxImportBytes = 300ULL * 1024ULL * 1024ULL;
@@ -745,6 +749,28 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [self showMessage:title message:message]; });
     });
+}
+
+- (void)restartPosterBoardTapped {
+    NSString *killallPath = nil;
+    for (NSString *base in @[@"/var/jb/usr/bin", @"/usr/bin", @"/bin"]) {
+        NSString *candidate = [base stringByAppendingPathComponent:@"killall"];
+        if ([NSFileManager.defaultManager isExecutableFileAtPath:candidate]) {
+            killallPath = candidate;
+            break;
+        }
+    }
+    if (!killallPath) killallPath = @"/usr/bin/killall";
+    pid_t pid = 0;
+    const char *argv[] = { [killallPath fileSystemRepresentation], "-9", "PosterBoard", NULL };
+    int rc = posix_spawn(&pid, argv[0], NULL, NULL, (char *const *)argv, environ);
+    if (rc == 0 && pid > 0) {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        [self showMessage:@"PosterBoard Restarted" message:@"PosterBoard has been reloaded. Open your Lock Screen or Settings > Wallpaper to see your wallpapers."];
+    } else {
+        [self showMessage:@"Restart Failed" message:@"Could not restart PosterBoard automatically. You can run 'killall -9 PosterBoard' in NewTerm or Respring in Dopamine."];
+    }
 }
 
 - (void)showMessage:(NSString *)title message:(NSString *)message {

@@ -37,4 +37,7 @@ if ! "$LAUNCHCTL" kickstart -k "$SERVICE"; then
     exit 1
 fi
 
+# Reload Preferences and PosterBoard so new store state is discovered immediately
+killall -9 Preferences PosterBoard >/dev/null 2>&1 || true
+
 exit 0

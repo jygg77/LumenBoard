@@ -22,7 +22,7 @@ launchd user/foreground/com.iuyghi.lumenboardd
 ## Package and launchd contract
 
 - Package: `com.iuyghi.lumenboard`
-- Current CI candidate: `0.1.0-17`
+- Current CI candidate: `0.1.0-18`
 - Debian architecture: `iphoneos-arm64`
 - Target: iOS 16.x, PosterBoard store structure 59, Collections extension
 - Daemon: `/var/jb/usr/libexec/lumenboardd`

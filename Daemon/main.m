@@ -5,9 +5,36 @@
 #import <unistd.h>
 #import <pwd.h>
 #import <errno.h>
+#import <spawn.h>
+#import <sys/wait.h>
 #import "../Shared/LBPaths.h"
 #import "LBPosterBoardInstaller.h"
 #import "LBPosterMediaBuilder.h"
+
+extern char **environ;
+
+static BOOL LBRestartPosterBoard(void) {
+    NSString *killallPath = nil;
+    for (NSString *base in @[@"/var/jb/usr/bin", @"/usr/bin", @"/bin"]) {
+        NSString *candidate = [base stringByAppendingPathComponent:@"killall"];
+        if ([NSFileManager.defaultManager isExecutableFileAtPath:candidate]) {
+            killallPath = candidate;
+            break;
+        }
+    }
+    if (!killallPath) {
+        killallPath = @"/usr/bin/killall";
+    }
+    pid_t pid = 0;
+    const char *argv[] = { [killallPath fileSystemRepresentation], "-9", "PosterBoard", NULL };
+    int rc = posix_spawn(&pid, argv[0], NULL, NULL, (char *const *)argv, environ);
+    if (rc == 0 && pid > 0) {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    return NO;
+}
 
 static NSLock *LBRequestLock;
 
@@ -148,6 +175,13 @@ static NSDictionary *LBProcessImportRequest(NSDictionary *request, NSError **err
     // "Published" is a filesystem registration result, not proof that PosterBoard
     // reloaded the store or that the wallpaper is visible/selectable/applied.
     NSMutableDictionary *report = [installation mutableCopy];
+    BOOL restarted = LBRestartPosterBoard();
+    report[@"refreshCommandAttempted"] = @YES;
+    report[@"posterBoardRefreshRequested"] = @(restarted);
+    if (restarted) {
+        report[@"posterBoardRefreshRequiresDeviceRestart"] = @NO;
+        report[@"refreshWarning"] = @"PosterBoard was restarted via killall -9 to immediately reload published descriptors.";
+    }
     report[@"descriptorRegistrationState"] = @"published";
     report[@"posterBoardApplicationState"] = @"unverified";
     NSMutableDictionary *manifest = [item[@"manifest"] mutableCopy];
@@ -292,6 +326,13 @@ static NSDictionary *LBProcessMediaInstallRequest(NSDictionary *request, NSError
     if (!installed) return nil;
     NSMutableDictionary *report = [installed mutableCopy];
     [report addEntriesFromDictionary:[LBPosterBoardInstaller requestPosterBoardRefreshForContainer:container]];
+    BOOL restarted = LBRestartPosterBoard();
+    report[@"refreshCommandAttempted"] = @YES;
+    report[@"posterBoardRefreshRequested"] = @(restarted);
+    if (restarted) {
+        report[@"posterBoardRefreshRequiresDeviceRestart"] = @NO;
+        report[@"refreshWarning"] = @"PosterBoard was restarted via killall -9 to immediately reload published descriptors.";
+    }
     report[@"sourceKind"] = kind;
     report[@"sourceSHA256"] = actualHash;
     report[@"descriptorRegistrationState"] = @"published";

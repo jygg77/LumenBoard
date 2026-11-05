@@ -11,6 +11,7 @@
     <dict><key>cell</key><string>PSButtonCell</string><key>label</key><string>Manage / remove imported items</string><key>action</key><string>manageLibraryTapped</string></dict>
     <dict><key>cell</key><string>PSButtonCell</string><key>label</key><string>Refresh local library</string><key>action</key><string>refreshLibraryTapped</string></dict>
     <dict><key>cell</key><string>PSGroupCell</string><key>label</key><string>Native integration</string><key>footerText</key><string>Native descriptor import targets iOS 16 structure version 59. Real wallpaper rendering and selection must still be verified on-device.</string></dict>
+    <dict><key>cell</key><string>PSButtonCell</string><key>label</key><string>Restart PosterBoard (Reload Gallery)</string><key>action</key><string>restartPosterBoardTapped</string></dict>
   </array>
 </dict>
 </plist>
