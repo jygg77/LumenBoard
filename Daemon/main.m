@@ -25,15 +25,23 @@ static BOOL LBRestartPosterBoard(void) {
     if (!killallPath) {
         killallPath = @"/usr/bin/killall";
     }
+    BOOL pbKilled = NO;
     pid_t pid = 0;
     const char *argv[] = { [killallPath fileSystemRepresentation], "-9", "PosterBoard", NULL };
     int rc = posix_spawn(&pid, argv[0], NULL, NULL, (char *const *)argv, environ);
     if (rc == 0 && pid > 0) {
         int status = 0;
         waitpid(pid, &status, 0);
-        return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        pbKilled = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     }
-    return NO;
+    pid_t uiPid = 0;
+    const char *uiArgv[] = { [killallPath fileSystemRepresentation], "-9", "PosterBoardUIService", NULL };
+    int uiRc = posix_spawn(&uiPid, uiArgv[0], NULL, NULL, (char *const *)uiArgv, environ);
+    if (uiRc == 0 && uiPid > 0) {
+        int status = 0;
+        waitpid(uiPid, &status, 0);
+    }
+    return pbKilled;
 }
 
 static NSLock *LBRequestLock;

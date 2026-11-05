@@ -15,6 +15,7 @@
 
 static NSString * const LBIssueDomain = @"com.iuyghi.LumenBoard.PosterBoardInstaller";
 static NSString * const LBCollectionsExtension = @"com.apple.WallpaperKit.CollectionsPoster";
+static NSString * const LBCollectionsAppExtension = @"com.apple.Posters.CollectionsPosterApp";
 static const NSInteger LBExpectedStructureVersion = 59;
 
 static NSError *LBInstallError(NSInteger code, NSString *message);
@@ -374,28 +375,39 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
             if (![wallpaper isKindOfClass:NSDictionary.class] ||
                 !LBIsPositiveNumericIdentifier(wallpaper[@"identifier"]) ||
                 ![wallpaper[@"name"] isKindOfClass:NSString.class] ||
-                !assets || !defaults || !backgroundName.length || !floatingName.length ||
-                !LBPathIsSafeRelative(backgroundName) || !LBPathIsSafeRelative(floatingName)) {
-                if (error) *error = LBInstallError(26, [NSString stringWithFormat:@"Invalid Wallpaper.plist or missing lockAndHome/default layer references at %@", file]);
+                !assets ||
+                (backgroundName && (!LBPathIsSafeRelative(backgroundName) || [backgroundName containsString:@":"])) ||
+                (floatingName && (!LBPathIsSafeRelative(floatingName) || [floatingName containsString:@":"]))) {
+                if (error) *error = LBInstallError(26, [NSString stringWithFormat:@"Invalid Wallpaper.plist or unsafe layer references at %@", file]);
                 return NO;
             }
             NSString *wallpaperBundleRoot = full.stringByDeletingLastPathComponent;
-            NSString *backgroundPath = [wallpaperBundleRoot stringByAppendingPathComponent:backgroundName];
-            NSString *floatingPath = [wallpaperBundleRoot stringByAppendingPathComponent:floatingName];
-            if (!LBIsDirectory(backgroundPath) || !LBIsDirectory(floatingPath)) {
-                if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing background/floating CAML bundles at %@", file]);
-                return NO;
+            NSMutableArray<NSString *> *layersToValidate = [NSMutableArray array];
+            if (backgroundName.length) {
+                NSString *backgroundPath = [wallpaperBundleRoot stringByAppendingPathComponent:backgroundName];
+                if (!LBIsDirectory(backgroundPath)) {
+                    if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing background bundle at %@", file]);
+                    return NO;
+                }
+                [layersToValidate addObject:backgroundPath];
             }
-            NSMutableArray<NSString *> *layersToValidate = [NSMutableArray arrayWithObjects:backgroundPath, floatingPath, nil];
+            if (floatingName.length) {
+                NSString *floatingPath = [wallpaperBundleRoot stringByAppendingPathComponent:floatingName];
+                if (!LBIsDirectory(floatingPath)) {
+                    if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing floating bundle at %@", file]);
+                    return NO;
+                }
+                [layersToValidate addObject:floatingPath];
+            }
             NSString *foregroundName = [defaults[@"foregroundAnimationFileName"] isKindOfClass:NSString.class] ? defaults[@"foregroundAnimationFileName"] : nil;
             if (foregroundName.length) {
-                if (!LBPathIsSafeRelative(foregroundName)) {
+                if (!LBPathIsSafeRelative(foregroundName) || [foregroundName containsString:@":"]) {
                     if (error) *error = LBInstallError(26, [NSString stringWithFormat:@"Invalid foreground layer reference at %@", file]);
                     return NO;
                 }
                 NSString *foregroundPath = [wallpaperBundleRoot stringByAppendingPathComponent:foregroundName];
                 if (!LBIsDirectory(foregroundPath)) {
-                    if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing foreground CAML bundle at %@", file]);
+                    if (error) *error = LBInstallError(28, [NSString stringWithFormat:@"Wallpaper.plist references missing foreground bundle at %@", file]);
                     return NO;
                 }
                 [layersToValidate addObject:foregroundPath];
@@ -403,22 +415,24 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
             for (NSString *layerPath in layersToValidate) {
                 NSString *indexPath = [layerPath stringByAppendingPathComponent:@"index.xml"];
                 NSString *rootDocumentPath = [layerPath stringByAppendingPathComponent:@"main.caml"];
-                if (!LBIsRegularFile(indexPath) || !LBIsRegularFile(rootDocumentPath)) {
-                    if (error) *error = LBInstallError(29, [NSString stringWithFormat:@"CAML layer is missing index.xml or main.caml: %@", layerPath]);
-                    return NO;
-                }
-                if (!LBValidateCAMLDocumentAtPath(rootDocumentPath, layerPath, error)) return NO;
-                NSData *indexData = [NSData dataWithContentsOfFile:indexPath];
-                NSPropertyListFormat indexFormat = NSPropertyListOpenStepFormat;
-                id indexObject = indexData ?
-                    [NSPropertyListSerialization propertyListWithData:indexData options:NSPropertyListImmutable format:&indexFormat error:nil] : nil;
-                id assetManifest = [indexObject isKindOfClass:NSDictionary.class] ? indexObject[@"assetManifest"] : nil;
-                BOOL assetManifestValid = !assetManifest || [assetManifest isEqual:@"assetManifest.caml"];
-                if (![indexObject isKindOfClass:NSDictionary.class] ||
-                    ![indexObject[@"rootDocument"] isEqual:@"main.caml"] ||
-                    !assetManifestValid) {
-                    if (error) *error = LBInstallError(32, [NSString stringWithFormat:@"CAML index.xml is not a valid PosterBoard property list or does not reference main.caml: %@", layerPath]);
-                    return NO;
+                if (LBIsRegularFile(indexPath) || LBIsRegularFile(rootDocumentPath) || [layerPath.pathExtension.lowercaseString isEqualToString:@"ca"]) {
+                    if (!LBIsRegularFile(indexPath) || !LBIsRegularFile(rootDocumentPath)) {
+                        if (error) *error = LBInstallError(29, [NSString stringWithFormat:@"CAML layer is missing index.xml or main.caml: %@", layerPath]);
+                        return NO;
+                    }
+                    if (!LBValidateCAMLDocumentAtPath(rootDocumentPath, layerPath, error)) return NO;
+                    NSData *indexData = [NSData dataWithContentsOfFile:indexPath];
+                    NSPropertyListFormat indexFormat = NSPropertyListOpenStepFormat;
+                    id indexObject = indexData ?
+                        [NSPropertyListSerialization propertyListWithData:indexData options:NSPropertyListImmutable format:&indexFormat error:nil] : nil;
+                    id assetManifest = [indexObject isKindOfClass:NSDictionary.class] ? indexObject[@"assetManifest"] : nil;
+                    BOOL assetManifestValid = !assetManifest || [assetManifest isEqual:@"assetManifest.caml"];
+                    if (![indexObject isKindOfClass:NSDictionary.class] ||
+                        ![indexObject[@"rootDocument"] isEqual:@"main.caml"] ||
+                        !assetManifestValid) {
+                        if (error) *error = LBInstallError(32, [NSString stringWithFormat:@"CAML index.xml is not a valid PosterBoard property list or does not reference main.caml: %@", layerPath]);
+                        return NO;
+                    }
                 }
             }
             wallpaperCount++;
@@ -461,11 +475,10 @@ static BOOL LBValidatePublishedDescriptorIdentifierConsistency(NSString *root, N
             NSDictionary *lockAndHome = [assets[@"lockAndHome"] isKindOfClass:NSDictionary.class] ? assets[@"lockAndHome"] : nil;
             NSDictionary *defaults = [lockAndHome[@"default"] isKindOfClass:NSDictionary.class] ? lockAndHome[@"default"] : nil;
             id wallpaperID = wallpaper[@"identifier"];
-            id defaultID = defaults[@"identifier"];
+            id defaultID = defaults ? defaults[@"identifier"] : nil;
             if (!LBIsPositiveNumericIdentifier(wallpaperID) ||
                 [wallpaperID longLongValue] != rootID ||
-                !LBIsPositiveNumericIdentifier(defaultID) ||
-                [defaultID longLongValue] != rootID) {
+                (defaultID && (!LBIsPositiveNumericIdentifier(defaultID) || [defaultID longLongValue] != rootID))) {
                 if (error) *error = LBInstallError(68, [NSString stringWithFormat:
                     @"Published descriptor identifier mismatch in %@: root=%lld, wallpaper=%@, default-layer=%@.",
                     relative, rootID, wallpaperID ?: @"(missing)", defaultID ?: @"(missing)"]);
@@ -627,14 +640,12 @@ static BOOL LBRewriteDescriptorIdentifiers(NSString *root, NSInteger numericID, 
             NSMutableDictionary *assets = [wallpaper[@"assets"] isKindOfClass:NSDictionary.class] ? [wallpaper[@"assets"] mutableCopy] : nil;
             NSMutableDictionary *lockAndHome = [assets[@"lockAndHome"] isKindOfClass:NSDictionary.class] ? [assets[@"lockAndHome"] mutableCopy] : nil;
             NSMutableDictionary *defaults = [lockAndHome[@"default"] isKindOfClass:NSDictionary.class] ? [lockAndHome[@"default"] mutableCopy] : nil;
-            if (!assets || !lockAndHome || !defaults) {
-                if (error) *error = LBInstallError(31, @"Cannot rewrite Wallpaper.plist default layer identifiers.");
-                return NO;
+            if (defaults) {
+                defaults[@"identifier"] = @(numericID);
+                lockAndHome[@"default"] = defaults;
+                assets[@"lockAndHome"] = lockAndHome;
+                wallpaper[@"assets"] = assets;
             }
-            defaults[@"identifier"] = @(numericID);
-            lockAndHome[@"default"] = defaults;
-            assets[@"lockAndHome"] = lockAndHome;
-            wallpaper[@"assets"] = assets;
             NSData *rewritten = [NSPropertyListSerialization dataWithPropertyList:wallpaper format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
             if (!rewritten || !LBWriteDataAtomically(rewritten, full, error)) return NO;
         }
@@ -687,10 +698,7 @@ static BOOL LBCollectDescriptorRoots(NSString *extractedPath, NSMutableArray<NSS
     for (NSString *child in children) {
         if ([child hasPrefix:@"."] || [child isEqualToString:@"__MACOSX"]) continue;
         NSString *path = [candidates.firstObject stringByAppendingPathComponent:child];
-        if (!LBIsDirectory(path)) {
-            if (error) *error = LBInstallError(42, @"The descriptor group contains a non-directory entry.");
-            return NO;
-        }
+        if (!LBIsDirectory(path)) continue;
         [roots addObject:path];
     }
     if (!roots.count) {
@@ -779,7 +787,7 @@ static BOOL LBReadExistingDescriptorMetadataIdentifier(NSString *descriptorPath,
             NSNumber *wallpaperID = LBParseExistingNumericIdentifier(wallpaper[@"identifier"]);
             id rawDefaultID = defaults ? defaults[@"identifier"] : nil;
             NSNumber *defaultID = rawDefaultID ? LBParseExistingNumericIdentifier(rawDefaultID) : nil;
-            if (!wallpaper || !wallpaperID || !defaults ||
+            if (!wallpaper || !wallpaperID ||
                 (rawDefaultID && !defaultID) ||
                 ![representingID isEqualToNumber:wallpaperID] ||
                 (defaultID && ![representingID isEqualToNumber:defaultID])) {
@@ -799,7 +807,7 @@ static BOOL LBReadExistingDescriptorMetadataIdentifier(NSString *descriptorPath,
             NSNumber *wallpaperID = LBParseExistingNumericIdentifier(wallpaper[@"identifier"]);
             id rawDefaultID = defaults ? defaults[@"identifier"] : nil;
             NSNumber *defaultID = rawDefaultID ? LBParseExistingNumericIdentifier(rawDefaultID) : nil;
-            if (!wallpaper || !wallpaperID || !defaults ||
+            if (!wallpaper || !wallpaperID ||
                 (rawDefaultID && !defaultID) ||
                 (defaultID && ![wallpaperID isEqualToNumber:defaultID])) {
                 if (error) *error = LBInstallError(66, [NSString stringWithFormat:
@@ -811,7 +819,7 @@ static BOOL LBReadExistingDescriptorMetadataIdentifier(NSString *descriptorPath,
         }
     }
 
-    if (userInfoCount == 0 || wallpaperCount == 0 || metadataIdentifiers.count != 1) {
+    if ((userInfoCount == 0 && wallpaperCount == 0) || metadataIdentifiers.count != 1) {
         if (error) *error = LBInstallError(66,
             @"Existing PosterBoard descriptor metadata is absent, ambiguous, or contains conflicting numeric identifiers.");
         return NO;
@@ -1030,8 +1038,11 @@ static void LBRollbackDescriptorsInSQLiteDatabase(NSString *dbPath, NSArray<NSSt
 static void LBCleanupStaleDescriptors(NSString *descriptorRoot) {
     if (!descriptorRoot.length || !LBIsDirectory(descriptorRoot)) return;
     NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:descriptorRoot error:nil];
-    for (NSString *entry in entries ?: @[]) {
-        if ([entry hasPrefix:@".lumenboard-staging-"]) {
+    if (!entries.count) return;
+
+    NSMutableArray<NSString *> *validDescriptorPaths = [NSMutableArray array];
+    for (NSString *entry in entries) {
+        if ([entry hasPrefix:@".lumenboard-staging-"] || [entry isEqualToString:@"__MACOSX"] || [entry isEqualToString:@".DS_Store"]) {
             [NSFileManager.defaultManager removeItemAtPath:[descriptorRoot stringByAppendingPathComponent:entry] error:nil];
             continue;
         }
@@ -1045,21 +1056,82 @@ static void LBCleanupStaleDescriptors(NSString *descriptorRoot) {
             continue;
         }
 
+        NSString *versionsPath = [path stringByAppendingPathComponent:@"versions"];
+        NSString *wallpaperPlistPath = [path stringByAppendingPathComponent:@"Wallpaper.plist"];
+        BOOL hasVersions = LBIsDirectory(versionsPath);
+        BOOL hasWallpaperPlist = LBIsRegularFile(wallpaperPlistPath);
+        if (!hasVersions && !hasWallpaperPlist) {
+            BOOL hasNestedDescriptor = NO;
+            for (NSString *c in contents) {
+                NSString *sub = [path stringByAppendingPathComponent:c];
+                if (LBIsDirectory(sub) && (LBIsDirectory([sub stringByAppendingPathComponent:@"versions"]) || LBIsRegularFile([sub stringByAppendingPathComponent:@"Wallpaper.plist"]))) {
+                    hasNestedDescriptor = YES;
+                    break;
+                }
+            }
+            if (!hasNestedDescriptor) {
+                [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+                continue;
+            }
+        }
+        [validDescriptorPaths addObject:path];
+    }
+
+    NSMutableSet<NSNumber *> *seenIDs = [NSMutableSet set];
+    for (NSString *path in validDescriptorPaths) {
         NSString *rootIDPath = [path stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
         struct stat rootIDStat;
         BOOL hasRootID = (lstat(rootIDPath.fileSystemRepresentation, &rootIDStat) == 0 && S_ISREG(rootIDStat.st_mode) && rootIDStat.st_size > 0);
-        if (!hasRootID) {
+        NSNumber *resolvedID = nil;
+        if (hasRootID) {
+            resolvedID = LBParseExistingNumericIdentifier(LBReadTrimmedString(rootIDPath));
+        }
+
+        if (!resolvedID) {
             NSNumber *metadataID = nil;
             if (LBReadExistingDescriptorMetadataIdentifier(path, &metadataID, nil) && metadataID) {
-                NSString *idText = [NSString stringWithFormat:@"%@", metadataID];
-                [idText writeToFile:rootIDPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                resolvedID = metadataID;
             } else {
-                NSString *versionsPath = [path stringByAppendingPathComponent:@"versions"];
-                if (!LBIsDirectory(versionsPath)) {
-                    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+                NSDirectoryEnumerator *scan = [NSFileManager.defaultManager enumeratorAtPath:path];
+                NSString *rel = nil;
+                while ((rel = scan.nextObject)) {
+                    if ([rel.lastPathComponent caseInsensitiveCompare:@"Wallpaper.plist"] == NSOrderedSame) {
+                        NSString *wpPath = [path stringByAppendingPathComponent:rel];
+                        NSDictionary *wp = LBReadExistingDescriptorPropertyList(wpPath);
+                        NSNumber *parsed = LBParseExistingNumericIdentifier(wp[@"identifier"]);
+                        if (parsed) {
+                            resolvedID = parsed;
+                            break;
+                        }
+                    }
                 }
             }
         }
+
+        if (!resolvedID || [seenIDs containsObject:resolvedID]) {
+            NSInteger candidate = 10000 + arc4random_uniform(89999);
+            while ([seenIDs containsObject:@(candidate)]) {
+                candidate = 10000 + arc4random_uniform(89999);
+            }
+            resolvedID = @(candidate);
+            LBRewriteDescriptorIdentifiers(path, candidate, nil);
+        } else {
+            NSString *idText = [NSString stringWithFormat:@"%@", resolvedID];
+            [idText writeToFile:rootIDPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+
+        [seenIDs addObject:resolvedID];
+
+        NSString *rolePath = [path stringByAppendingPathComponent:@"com.apple.posterkit.role.identifier"];
+        if (!LBIsRegularFile(rolePath)) {
+            [@"PRPosterRoleLockScreen" writeToFile:rolePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSString *provInfoPath = [path stringByAppendingPathComponent:@"providerInfo.plist"];
+        if (!LBIsRegularFile(provInfoPath)) {
+            NSData *pData = [NSKeyedArchiver archivedDataWithRootObject:@{@"kConfigurationLastUseDateKey": [NSDate date]} requiringSecureCoding:NO error:nil];
+            if (pData) [pData writeToFile:provInfoPath atomically:YES];
+        }
+        LBSetMobileOwnership(path, nil);
     }
 }
 
@@ -1214,6 +1286,22 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
         [seen addObject:uuid];
         NSString *descriptorPath = [descriptorRoot stringByAppendingPathComponent:uuid];
         if (!LBIsDirectory(descriptorPath)) {
+            NSString *dataStoreBase = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
+            for (NSString *v in @[@"59", @"61"]) {
+                for (NSString *ext in @[LBCollectionsExtension, LBCollectionsAppExtension]) {
+                    NSString *altPath = [[[[dataStoreBase stringByAppendingPathComponent:v]
+                        stringByAppendingPathComponent:@"Extensions"]
+                        stringByAppendingPathComponent:ext]
+                        stringByAppendingPathComponent:[NSString stringWithFormat:@"descriptors/%@", uuid]];
+                    if (LBIsDirectory(altPath)) {
+                        descriptorPath = altPath;
+                        break;
+                    }
+                }
+                if (LBIsDirectory(descriptorPath)) break;
+            }
+        }
+        if (!LBIsDirectory(descriptorPath)) {
             [missing addObject:uuid];
             continue;
         }
@@ -1273,9 +1361,34 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
         return nil;
     }
     NSString *applicationSupport = [containerPath stringByAppendingPathComponent:@"Library/Application Support"];
-    NSString *extensionRoot = [[applicationSupport stringByAppendingPathComponent:@"PRBPosterExtensionDataStore/59/Extensions"] stringByAppendingPathComponent:LBCollectionsExtension];
+    NSString *dataStoreBase = [applicationSupport stringByAppendingPathComponent:@"PRBPosterExtensionDataStore"];
+
+    NSMutableArray<NSString *> *activeVersions = [NSMutableArray array];
+    for (NSString *v in @[@"59", @"61"]) {
+        NSString *vPath = [dataStoreBase stringByAppendingPathComponent:v];
+        if (LBIsDirectory(vPath)) {
+            [activeVersions addObject:v];
+        }
+    }
+    if (activeVersions.count == 0) {
+        [activeVersions addObject:@"59"];
+    }
+
+    for (NSString *v in activeVersions) {
+        for (NSString *ext in @[LBCollectionsExtension, LBCollectionsAppExtension]) {
+            NSString *descRoot = [[[[dataStoreBase stringByAppendingPathComponent:v]
+                stringByAppendingPathComponent:@"Extensions"]
+                stringByAppendingPathComponent:ext]
+                stringByAppendingPathComponent:@"descriptors"];
+            LBCleanupStaleDescriptors(descRoot);
+        }
+    }
+
+    NSString *primaryVersion = activeVersions.firstObject;
+    NSString *extensionRoot = [[[dataStoreBase stringByAppendingPathComponent:primaryVersion]
+        stringByAppendingPathComponent:@"Extensions"]
+        stringByAppendingPathComponent:LBCollectionsExtension];
     NSString *descriptorRoot = [extensionRoot stringByAppendingPathComponent:@"descriptors"];
-    LBCleanupStaleDescriptors(descriptorRoot);
 
     NSString *stage = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"LumenBoard-%@", NSUUID.UUID.UUIDString.lowercaseString]];
     NSError *validationError = nil;
@@ -1287,6 +1400,28 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
     NSDictionary *result = [self installExtractedDescriptorTreeAtPath:stage descriptorRoot:descriptorRoot error:error];
     [NSFileManager.defaultManager removeItemAtPath:stage error:nil];
     if (!result) return nil;
+
+    NSArray<NSString *> *installedUUIDs = result[@"installedDescriptorIdentifiers"] ?: @[];
+    for (NSString *v in activeVersions) {
+        for (NSString *ext in @[LBCollectionsExtension, LBCollectionsAppExtension]) {
+            NSString *targetDescRoot = [[[[dataStoreBase stringByAppendingPathComponent:v]
+                stringByAppendingPathComponent:@"Extensions"]
+                stringByAppendingPathComponent:ext]
+                stringByAppendingPathComponent:@"descriptors"];
+            if ([targetDescRoot isEqualToString:descriptorRoot]) continue;
+
+            LBEnsureDirectoryTree(targetDescRoot, 0755, nil);
+            for (NSString *uuid in installedUUIDs) {
+                NSString *src = [descriptorRoot stringByAppendingPathComponent:uuid];
+                NSString *dst = [targetDescRoot stringByAppendingPathComponent:uuid];
+                if (!LBIsDirectory(src)) continue;
+                if (LBIsDirectory(dst)) [NSFileManager.defaultManager removeItemAtPath:dst error:nil];
+                if ([NSFileManager.defaultManager copyItemAtPath:src toPath:dst error:nil]) {
+                    LBSetMobileOwnership(dst, nil);
+                }
+            }
+        }
+    }
 
     NSMutableDictionary *final = [result mutableCopy];
     [final addEntriesFromDictionary:[self requestPosterBoardRefreshForContainer:containerPath]];
@@ -1506,24 +1641,39 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
 
         preferences[@"PBF_LOCALE_DID_CHANGE"] = @NO;
         preferences[@"PBF_RESET_FILE_PROTECTIONS"] = @YES;
-        [preferences removeObjectForKey:@"PersistedPosterContainerBundleIdentifiers"];
-        [preferences removeObjectForKey:@"CompletedPosterBundleIdentifierMigrations"];
+        preferences[@"PersistedPosterContainerBundleIdentifiers"] = @[
+            LBCollectionsAppExtension,
+            LBCollectionsExtension
+        ];
+        preferences[@"CompletedPosterBundleIdentifierMigrations"] = @[
+            @"com.apple.Posters.UnityPosterApp.ExtragalacticPoster",
+            @"com.apple.Posters.WeatherPosterApp.WeatherPoster",
+            @"com.apple.Posters.UnityPosterApp.Unity2025Poster",
+            @"com.apple.Posters.UnityPosterApp.UnityPosterExtension",
+            @"com.apple.Posters.UnityPosterApp.RhizomePoster",
+            @"com.apple.Posters.KaleidoscopePosterApp.KaleidoscopePoster"
+        ];
 
-        // Clear the cached snapshot index so PosterBoard is forced to re-read
-        // all descriptors under Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors
-        NSString *storeRoot = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore/59"];
-        NSString *galleryIndex = [storeRoot stringByAppendingPathComponent:@"PRPosterRoleLockScreen-gallery-index.json"];
-        struct stat giStat;
-        if (lstat(galleryIndex.fileSystemRepresentation, &giStat) == 0 && S_ISREG(giStat.st_mode)) {
-            [NSFileManager.defaultManager removeItemAtPath:galleryIndex error:nil];
+        // Clear the cached snapshot index and purge stale entries across all store versions
+        NSString *dataStoreBase = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
+        for (NSString *v in @[@"59", @"61"]) {
+            NSString *storeRoot = [dataStoreBase stringByAppendingPathComponent:v];
+            if (!LBIsDirectory(storeRoot)) continue;
+            NSString *galleryIndex = [storeRoot stringByAppendingPathComponent:@"PRPosterRoleLockScreen-gallery-index.json"];
+            struct stat giStat;
+            if (lstat(galleryIndex.fileSystemRepresentation, &giStat) == 0 && S_ISREG(giStat.st_mode)) {
+                [NSFileManager.defaultManager removeItemAtPath:galleryIndex error:nil];
+            }
+            NSString *sqlitePath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
+            struct stat sqStat;
+            if (lstat(sqlitePath.fileSystemRepresentation, &sqStat) == 0 && S_ISREG(sqStat.st_mode)) {
+                LBCleanupStalePosterBoardDatabase(sqlitePath, storeRoot);
+            }
+            for (NSString *ext in @[LBCollectionsExtension, LBCollectionsAppExtension]) {
+                NSString *descRoot = [[[storeRoot stringByAppendingPathComponent:@"Extensions"] stringByAppendingPathComponent:ext] stringByAppendingPathComponent:@"descriptors"];
+                LBCleanupStaleDescriptors(descRoot);
+            }
         }
-        NSString *sqlitePath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
-        struct stat sqStat;
-        if (lstat(sqlitePath.fileSystemRepresentation, &sqStat) == 0 && S_ISREG(sqStat.st_mode)) {
-            LBCleanupStalePosterBoardDatabase(sqlitePath, storeRoot);
-        }
-        NSString *descRoot = [[[storeRoot stringByAppendingPathComponent:@"Extensions"] stringByAppendingPathComponent:LBCollectionsExtension] stringByAppendingPathComponent:@"descriptors"];
-        LBCleanupStaleDescriptors(descRoot);
         NSError *serializationError = nil;
         NSData *data = [NSPropertyListSerialization dataWithPropertyList:preferences
             format:NSPropertyListBinaryFormat_v1_0 options:0 error:&serializationError];
@@ -1601,12 +1751,21 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
                              error:(NSError **)error {
     (void)error;
     if (!identifiers.count || !LBIsDirectory(containerPath)) return YES;
-    NSString *descriptorRoot = [[containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore/59/Extensions"] stringByAppendingPathComponent:[LBCollectionsExtension stringByAppendingPathComponent:@"descriptors"]];
-    for (NSString *uuid in identifiers) {
-        if (![uuid isKindOfClass:NSString.class] || !uuid.length) continue;
-        NSString *path = [descriptorRoot stringByAppendingPathComponent:uuid];
-        if (LBIsDirectory(path)) {
-            [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    NSString *dataStoreBase = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
+    for (NSString *v in @[@"59", @"61"]) {
+        NSString *vDir = [dataStoreBase stringByAppendingPathComponent:v];
+        if (!LBIsDirectory(vDir)) continue;
+        for (NSString *ext in @[LBCollectionsExtension, LBCollectionsAppExtension]) {
+            NSString *descriptorRoot = [[[vDir stringByAppendingPathComponent:@"Extensions"]
+                stringByAppendingPathComponent:ext]
+                stringByAppendingPathComponent:@"descriptors"];
+            for (NSString *uuid in identifiers) {
+                if (![uuid isKindOfClass:NSString.class] || !uuid.length) continue;
+                NSString *path = [descriptorRoot stringByAppendingPathComponent:uuid];
+                if (LBIsDirectory(path)) {
+                    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+                }
+            }
         }
     }
     [self requestPosterBoardRefreshForContainer:containerPath];
