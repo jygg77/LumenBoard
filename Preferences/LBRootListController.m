@@ -72,9 +72,78 @@ static BOOL LBWriteManagedManifest(NSMutableDictionary *manifest, NSString *item
     return YES;
 }
 
-static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *action, NSString **requestIDOut, NSError **error) {
+static BOOL LBValidRequestUUID(NSString *value) {
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:value ?: @""];
+    return uuid != nil && [uuid.UUIDString.lowercaseString isEqualToString:value.lowercaseString];
+}
+
+static NSDictionary *LBReadValidatedCompletion(NSString *requestID, NSString *expectedAction, NSError **error) {
+    if (!LBValidRequestUUID(requestID)) {
+        if (error) *error = [NSError errorWithDomain:@"LumenBoard" code:211 userInfo:@{NSLocalizedDescriptionKey:@"The daemon request identifier is not a canonical UUID."}];
+        return nil;
+    }
+    NSString *completionPath = [LBCompletedPath() stringByAppendingPathComponent:[requestID stringByAppendingPathExtension:@"plist"]];
+    struct stat st;
+    if (lstat(completionPath.fileSystemRepresentation, &st) != 0) return nil;
+    if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode) || st.st_size <= 0 || st.st_size > 1024 * 1024) {
+        if (error) *error = [NSError errorWithDomain:@"LumenBoard" code:210 userInfo:@{NSLocalizedDescriptionKey:@"The daemon completion record is not a safe regular file."}];
+        return nil;
+    }
+    NSDictionary *completion = [NSDictionary dictionaryWithContentsOfFile:completionPath];
+    NSString *completionAction = [completion isKindOfClass:NSDictionary.class] && [completion[@"action"] isKindOfClass:NSString.class] ?
+        completion[@"action"] : nil;
+    BOOL actionMatches = !expectedAction.length || [completionAction isEqualToString:expectedAction];
+    if (![completion isKindOfClass:NSDictionary.class] ||
+        ![completion[@"requestID"] isEqualToString:requestID] ||
+        ![completion[@"finished"] boolValue] ||
+        !actionMatches) {
+        if (error) *error = [NSError errorWithDomain:@"LumenBoard" code:211 userInfo:@{NSLocalizedDescriptionKey:@"The daemon returned an invalid completion record."}];
+        return nil;
+    }
+    return completion;
+}
+
+static BOOL LBAcknowledgeDaemonCompletion(NSString *requestID) {
+    if (!LBValidRequestUUID(requestID)) return NO;
+    NSString *path = [LBCompletedPath() stringByAppendingPathComponent:[requestID stringByAppendingPathExtension:@"plist"]];
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) != 0) return errno == ENOENT;
+    if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) return NO;
+    return [NSFileManager.defaultManager removeItemAtPath:path error:nil] ||
+        (lstat(path.fileSystemRepresentation, &st) != 0 && errno == ENOENT);
+}
+
+static BOOL LBFinalizeAndAcknowledgeManifestCompletion(NSMutableDictionary *manifest,
+                                                       NSString *itemDirectory,
+                                                       NSString *requestID,
+                                                       NSError **error) {
+    if (requestID.length) manifest[@"daemonRequestID"] = requestID;
+    // Phase A: commit the terminal manifest while retaining daemonRequestID so
+    // an interruption before completion deletion remains discoverable on refresh.
+    if (!LBWriteManagedManifest(manifest, itemDirectory, error)) {
+        return NO;
+    }
+    // Phase B: remove the completion plist only after Phase A succeeded, then
+    // clear daemonRequestID in a follow-up cleanup write.
+    if (LBAcknowledgeDaemonCompletion(requestID)) {
+        [manifest removeObjectForKey:@"daemonRequestID"];
+        LBWriteManagedManifest(manifest, itemDirectory, nil);
+    }
+    return YES;
+}
+
+static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *action, NSMutableDictionary *manifest, NSString *itemDirectory, NSString **requestIDOut, NSError **error) {
     if (!LBEnsureDaemonDirectories(error)) return nil;
     NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
+    // Persist the correlation ID before the daemon can observe the request.
+    // If this write fails, do not enqueue work that Preferences cannot reconcile.
+    if (manifest && itemDirectory) {
+        manifest[@"daemonRequestID"] = requestID;
+        if (!LBWriteManagedManifest(manifest, itemDirectory, error)) {
+            [manifest removeObjectForKey:@"daemonRequestID"];
+            return nil;
+        }
+    }
     NSDictionary *request = @{
         @"requestID": requestID,
         @"action": action,
@@ -83,12 +152,22 @@ static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *
     };
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:request
         format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
-    if (!data) return nil;
+    if (!data) {
+        if (manifest && itemDirectory) {
+            [manifest removeObjectForKey:@"daemonRequestID"];
+            LBWriteManagedManifest(manifest, itemDirectory, nil);
+        }
+        return nil;
+    }
     NSString *requestPath = [LBRequestsPath() stringByAppendingPathComponent:[requestID stringByAppendingPathExtension:@"plist"]];
     if (![data writeToFile:requestPath options:NSDataWritingAtomic error:error] ||
         chmod(requestPath.fileSystemRepresentation, 0600) != 0) {
         if (error && !*error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
         [NSFileManager.defaultManager removeItemAtPath:requestPath error:nil];
+        if (manifest && itemDirectory) {
+            [manifest removeObjectForKey:@"daemonRequestID"];
+            LBWriteManagedManifest(manifest, itemDirectory, nil);
+        }
         return nil;
     }
     if (requestIDOut) *requestIDOut = requestID;
@@ -100,18 +179,15 @@ static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *
     while ([deadline timeIntervalSinceNow] > 0) {
         struct stat st;
         if (lstat(completionPath.fileSystemRepresentation, &st) == 0) {
-            if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode) || st.st_size <= 0 || st.st_size > 1024 * 1024) {
-                if (error) *error = [NSError errorWithDomain:@"LumenBoard" code:210 userInfo:@{NSLocalizedDescriptionKey:@"The daemon completion record is not a safe regular file."}];
+            NSError *validationError = nil;
+            NSDictionary *completion = LBReadValidatedCompletion(requestID, action, &validationError);
+            if (!completion) {
+                if (error) *error = validationError;
                 return nil;
             }
-            NSDictionary *completion = [NSDictionary dictionaryWithContentsOfFile:completionPath];
-            [NSFileManager.defaultManager removeItemAtPath:completionPath error:nil];
-            if (![completion isKindOfClass:NSDictionary.class] ||
-                ![completion[@"requestID"] isEqualToString:requestID] ||
-                ![completion[@"finished"] boolValue]) {
-                if (error) *error = [NSError errorWithDomain:@"LumenBoard" code:211 userInfo:@{NSLocalizedDescriptionKey:@"The daemon returned an invalid completion record."}];
-                return nil;
-            }
+            // Imports keep the completion until their final manifest write succeeds.
+            // Verification-only calls have no managed manifest to commit.
+            if (!manifest || !itemDirectory) [NSFileManager.defaultManager removeItemAtPath:completionPath error:nil];
             if (![completion[@"success"] boolValue]) {
                 NSString *message = [completion[@"error"] isKindOfClass:NSString.class] ? completion[@"error"] : @"The PosterBoard daemon rejected the import.";
                 NSInteger code = [completion[@"errorCode"] respondsToSelector:@selector(integerValue)] ? [completion[@"errorCode"] integerValue] : 212;
@@ -128,12 +204,12 @@ static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *
 }
 
 
-static NSDictionary *LBQueueTendiesImportAndWait(NSString *identifier, NSString **requestIDOut, NSError **error) {
-    return LBQueueDaemonActionAndWait(identifier, @"import-tendies", requestIDOut, error);
+static NSDictionary *LBQueueTendiesImportAndWait(NSString *identifier, NSMutableDictionary *manifest, NSString *itemDirectory, NSString **requestIDOut, NSError **error) {
+    return LBQueueDaemonActionAndWait(identifier, @"import-tendies", manifest, itemDirectory, requestIDOut, error);
 }
 
 static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSError **error) {
-    NSDictionary *completion = LBQueueDaemonActionAndWait(identifier, @"verify-tendies-registration", NULL, error);
+    NSDictionary *completion = LBQueueDaemonActionAndWait(identifier, @"verify-tendies-registration", nil, nil, NULL, error);
     if (![completion[@"success"] boolValue]) return nil;
     return [completion[@"result"] isKindOfClass:NSDictionary.class] ? completion[@"result"] : nil;
 }
@@ -230,10 +306,22 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
         if (!manifest) continue;
         NSString *status = [manifest[@"status"] isKindOfClass:NSString.class] ? manifest[@"status"] : @"unknown";
         NSString *requestID = [manifest[@"daemonRequestID"] isKindOfClass:NSString.class] ? manifest[@"daemonRequestID"] : nil;
-        if (([status isEqualToString:@"registering"] || [status isEqualToString:@"generating"]) && requestID.length) {
+        NSUUID *requestUUID = requestID ? [[NSUUID alloc] initWithUUIDString:requestID] : nil;
+        BOOL requestIDIsValid = requestUUID && [requestUUID.UUIDString.lowercaseString isEqualToString:requestID.lowercaseString];
+        NSString *itemDirectory = [LBLibraryPath() stringByAppendingPathComponent:entry];
+        NSString *expectedAction = ([manifest[@"type"] isEqualToString:@"image"] || [manifest[@"type"] isEqualToString:@"video"]) ?
+            @"install-media" : @"import-tendies";
+        if (([status isEqualToString:@"registering"] || [status isEqualToString:@"generating"]) && requestIDIsValid) {
             NSString *completionPath = [LBCompletedPath() stringByAppendingPathComponent:[requestID stringByAppendingPathExtension:@"plist"]];
-            NSDictionary *completion = [NSDictionary dictionaryWithContentsOfFile:completionPath];
+            struct stat completionStat;
+            NSDictionary *completion = nil;
+            if (lstat(completionPath.fileSystemRepresentation, &completionStat) == 0 &&
+                S_ISREG(completionStat.st_mode) && !S_ISLNK(completionStat.st_mode) &&
+                completionStat.st_size > 0 && completionStat.st_size <= 1024 * 1024) {
+                completion = LBReadValidatedCompletion(requestID, expectedAction, nil);
+            }
             if ([completion[@"requestID"] isEqualToString:requestID] && [completion[@"finished"] boolValue]) {
+                NSString *pendingStatus = status;
                 if ([completion[@"success"] boolValue]) {
                     manifest[@"status"] = @"registered-unverified";
                     BOOL mediaInstall = [completion[@"action"] isEqualToString:@"install-media"] ||
@@ -247,10 +335,32 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                     manifest[@"installationState"] = @"failed";
                     manifest[@"installationError"] = completion[@"error"] ?: @"PosterBoard descriptor registration failed.";
                 }
+                NSError *reconciliationWriteError = nil;
+                if (LBFinalizeAndAcknowledgeManifestCompletion(manifest, itemDirectory, requestID, &reconciliationWriteError)) {
+                    status = [manifest[@"status"] isKindOfClass:NSString.class] ? manifest[@"status"] : @"unknown";
+                } else {
+                    // Keep both the durable pending request ID and completion record.
+                    // A later refresh can retry this manifest commit safely.
+                    manifest[@"status"] = pendingStatus;
+                    manifest[@"installationState"] = @"queued";
+                    manifest[@"daemonRequestID"] = requestID;
+                    status = [pendingStatus isEqualToString:@"generating"] ? @"generating" : @"registering";
+                }
+            }
+        } else if (([status isEqualToString:@"registered-unverified"] ||
+                    [status isEqualToString:@"imported"] ||
+                    [status isEqualToString:@"failed"]) && requestIDIsValid) {
+            // Cleanup-only recovery for the Phase A -> Phase B crash window (or when
+            // the daemon already persisted the terminal manifest state): acknowledge
+            // a valid matching completion or clear a already-acknowledged UUID without
+            // re-running or overwriting the terminal manifest state.
+            NSString *completionPath = [LBCompletedPath() stringByAppendingPathComponent:[requestID stringByAppendingPathExtension:@"plist"]];
+            struct stat completionStat;
+            BOOL completionAbsent = (lstat(completionPath.fileSystemRepresentation, &completionStat) != 0 && errno == ENOENT);
+            NSDictionary *completion = completionAbsent ? nil : LBReadValidatedCompletion(requestID, expectedAction, nil);
+            if (completionAbsent || (completion && LBAcknowledgeDaemonCompletion(requestID))) {
                 [manifest removeObjectForKey:@"daemonRequestID"];
-                LBWriteManagedManifest(manifest, [LBLibraryPath() stringByAppendingPathComponent:entry], nil);
-                [NSFileManager.defaultManager removeItemAtPath:completionPath error:nil];
-                status = [manifest[@"status"] isKindOfClass:NSString.class] ? manifest[@"status"] : @"unknown";
+                LBWriteManagedManifest(manifest, itemDirectory, nil);
             }
         }
         if ([status isEqualToString:@"registered-unverified"] || [status isEqualToString:@"imported"]) registered++;
@@ -474,24 +584,26 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                                         if (LBWriteManagedManifest(manifest, itemDirectory, &error)) {
                                             NSString *requestID = nil;
                                             NSError *daemonError = nil;
-                                            NSDictionary *completion = LBQueueTendiesImportAndWait(identifier, &requestID, &daemonError);
+                                            NSDictionary *completion = LBQueueTendiesImportAndWait(identifier, manifest, itemDirectory, &requestID, &daemonError);
                                             if (requestID.length) manifest[@"daemonRequestID"] = requestID;
                                             if (completion && [completion[@"success"] boolValue]) {
+                                                NSDictionary *installationReport = [completion[@"result"] isKindOfClass:NSDictionary.class] ? completion[@"result"] : @{};
                                                 manifest[@"status"] = @"registered-unverified";
                                                 manifest[@"installationState"] = @"descriptors-published";
                                                 manifest[@"registeredAt"] = [NSDate date];
-                                                manifest[@"installationReport"] = completion[@"result"] ?: @{};
-                                                [manifest removeObjectForKey:@"daemonRequestID"];
+                                                manifest[@"installationReport"] = installationReport;
+                                                manifest[@"installedDescriptorIdentifiers"] = installationReport[@"installedDescriptorIdentifiers"] ?: @[];
                                                 finalStatus = @"registered-unverified";
                                                 stored = YES;
-                                                NSDictionary *installationReport = [completion[@"result"] isKindOfClass:NSDictionary.class] ? completion[@"result"] : @{};
                                                 userMessage = [NSString stringWithFormat:
                                                     @"The descriptor records were published to the iOS 16 PosterBoard Collections store. %@ Native gallery recognition, wallpaper selection, and actual application remain unverified on this device.",
                                                     LBPosterBoardRefreshStatus(installationReport)];
                                                 if ([installationReport[@"refreshWarning"] isKindOfClass:NSString.class]) {
                                                     userMessage = [userMessage stringByAppendingFormat:@"\n\nRefresh details: %@", installationReport[@"refreshWarning"]];
                                                 }
-                                            } else if ([completion[@"timedOut"] boolValue]) {
+                                            } else if ([completion[@"timedOut"] boolValue] || (!completion && requestID.length)) {
+                                                // A timeout or malformed/unreadable completion after dispatch must not
+                                                // destroy recovery capability: preserve the pending status and requestID.
                                                 manifest[@"status"] = @"registering";
                                                 manifest[@"installationState"] = @"queued";
                                                 manifest[@"installationError"] = daemonError.localizedDescription ?: @"The daemon has not responded yet.";
@@ -505,7 +617,19 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                                                 finalStatus = @"failed";
                                                 error = daemonError;
                                             }
-                                            LBWriteManagedManifest(manifest, itemDirectory, nil);
+                                            NSError *finalManifestError = nil;
+                                            if ([completion[@"finished"] boolValue]) {
+                                                if (!LBFinalizeAndAcknowledgeManifestCompletion(manifest, itemDirectory, requestID, &finalManifestError)) {
+                                                    manifest[@"status"] = @"registering";
+                                                    manifest[@"installationState"] = @"queued";
+                                                    manifest[@"daemonRequestID"] = requestID;
+                                                    finalStatus = @"registering";
+                                                    stored = YES;
+                                                    error = finalManifestError;
+                                                }
+                                            } else {
+                                                LBWriteManagedManifest(manifest, itemDirectory, &finalManifestError);
+                                            }
                                         } else {
                                             manifest[@"status"] = @"failed";
                                             manifest[@"installationState"] = @"not-queued";
@@ -526,7 +650,7 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                                 if (LBWriteManagedManifest(manifest, itemDirectory, &error)) {
                                     NSString *requestID = nil;
                                     NSError *daemonError = nil;
-                                    NSDictionary *completion = LBQueueDaemonActionAndWait(identifier, @"install-media", &requestID, &daemonError);
+                                    NSDictionary *completion = LBQueueDaemonActionAndWait(identifier, @"install-media", manifest, itemDirectory, &requestID, &daemonError);
                                     if (requestID.length) manifest[@"daemonRequestID"] = requestID;
                                     if (completion && [completion[@"success"] boolValue]) {
                                         NSDictionary *report = [completion[@"result"] isKindOfClass:NSDictionary.class] ? completion[@"result"] : @{};
@@ -535,7 +659,6 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                                         manifest[@"installationReport"] = report;
                                         manifest[@"installedDescriptorIdentifiers"] = report[@"installedDescriptorIdentifiers"] ?: @[];
                                         manifest[@"registeredAt"] = [NSDate date];
-                                        [manifest removeObjectForKey:@"daemonRequestID"];
                                         finalStatus = @"registered-unverified";
                                         stored = YES;
                                         userMessage = [NSString stringWithFormat:
@@ -544,7 +667,7 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                                         if ([report[@"refreshWarning"] isKindOfClass:NSString.class]) {
                                             userMessage = [userMessage stringByAppendingFormat:@"\n\nRefresh details: %@", report[@"refreshWarning"]];
                                         }
-                                    } else if ([completion[@"timedOut"] boolValue]) {
+                                    } else if ([completion[@"timedOut"] boolValue] || (!completion && requestID.length)) {
                                         manifest[@"status"] = @"generating";
                                         manifest[@"installationState"] = @"queued";
                                         manifest[@"installationError"] = daemonError.localizedDescription ?: @"The media generation request is still queued.";
@@ -558,7 +681,19 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
                                         finalStatus = @"failed";
                                         error = daemonError;
                                     }
-                                    LBWriteManagedManifest(manifest, itemDirectory, nil);
+                                    NSError *finalManifestError = nil;
+                                    if ([completion[@"finished"] boolValue]) {
+                                        if (!LBFinalizeAndAcknowledgeManifestCompletion(manifest, itemDirectory, requestID, &finalManifestError)) {
+                                            manifest[@"status"] = @"generating";
+                                            manifest[@"installationState"] = @"queued";
+                                            manifest[@"daemonRequestID"] = requestID;
+                                            finalStatus = @"generating";
+                                            stored = YES;
+                                            error = finalManifestError;
+                                        }
+                                    } else {
+                                        LBWriteManagedManifest(manifest, itemDirectory, &finalManifestError);
+                                    }
                                 } else {
                                     manifest[@"status"] = @"failed";
                                     manifest[@"installationState"] = @"not-queued";

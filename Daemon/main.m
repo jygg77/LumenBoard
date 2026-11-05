@@ -236,6 +236,13 @@ static NSDictionary *LBProcessMediaInstallRequest(NSDictionary *request, NSError
         return nil;
     }
     NSString *itemRoot = [LBLibraryPath() stringByAppendingPathComponent:identifier];
+    struct stat itemRootStat;
+    if (lstat(itemRoot.fileSystemRepresentation, &itemRootStat) != 0 ||
+        !S_ISDIR(itemRootStat.st_mode) || S_ISLNK(itemRootStat.st_mode)) {
+        if (error) *error = [NSError errorWithDomain:@"com.iuyghi.LumenBoard.Daemon" code:135
+            userInfo:@{NSLocalizedDescriptionKey:@"Managed media item directory is missing, not a directory, or is a symlink."}];
+        return nil;
+    }
     NSString *manifestPath = [itemRoot stringByAppendingPathComponent:@"manifest.plist"];
     if (!LBRegularFile(manifestPath, 1024 * 1024)) {
         if (error) *error = [NSError errorWithDomain:@"com.iuyghi.LumenBoard.Daemon" code:131 userInfo:@{NSLocalizedDescriptionKey:@"Managed media manifest is missing or unsafe."}];
@@ -244,9 +251,16 @@ static NSDictionary *LBProcessMediaInstallRequest(NSDictionary *request, NSError
     NSMutableDictionary *manifest = [[NSDictionary dictionaryWithContentsOfFile:manifestPath] mutableCopy];
     NSString *kind = [manifest[@"type"] isKindOfClass:NSString.class] ? manifest[@"type"] : nil;
     NSString *filename = [manifest[@"sourceFilename"] isKindOfClass:NSString.class] ? manifest[@"sourceFilename"] : nil;
+    NSSet<NSString *> *allowedImageExtensions = [NSSet setWithArray:@[@"jpg", @"jpeg", @"png", @"heic", @"heif", @"tif", @"tiff", @"gif"]];
+    NSSet<NSString *> *allowedVideoExtensions = [NSSet setWithArray:@[@"mov", @"mp4", @"m4v"]];
+    NSSet<NSString *> *allowedExtensions = [kind isEqualToString:@"image"] ? allowedImageExtensions : allowedVideoExtensions;
+    NSString *sourceExtension = filename.pathExtension.lowercaseString;
+    BOOL canonicalSourceFilename = sourceExtension.length > 0 &&
+        [filename isEqualToString:[@"source" stringByAppendingPathExtension:sourceExtension]] &&
+        [allowedExtensions containsObject:sourceExtension];
     if (![manifest[@"identifier"] isEqualToString:identifier] ||
         (![kind isEqualToString:@"image"] && ![kind isEqualToString:@"video"]) ||
-        !filename.length || [filename containsString:@"/"] || [filename containsString:@"\\"]) {
+        !canonicalSourceFilename) {
         if (error) *error = [NSError errorWithDomain:@"com.iuyghi.LumenBoard.Daemon" code:132 userInfo:@{NSLocalizedDescriptionKey:@"Managed manifest does not describe a supported image or video source."}];
         return nil;
     }
@@ -287,7 +301,6 @@ static NSDictionary *LBProcessMediaInstallRequest(NSDictionary *request, NSError
     manifest[@"installedDescriptorIdentifiers"] = report[@"installedDescriptorIdentifiers"] ?: @[];
     manifest[@"installationReport"] = report;
     manifest[@"registeredAt"] = [NSDate date];
-    [manifest removeObjectForKey:@"daemonRequestID"];
     NSData *manifestData = [NSPropertyListSerialization dataWithPropertyList:manifest format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
     if (!manifestData || ![manifestData writeToFile:manifestPath options:NSDataWritingAtomic error:error]) {
         // Descriptor publication is already committed. Preserve that success

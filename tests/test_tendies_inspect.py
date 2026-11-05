@@ -1,5 +1,6 @@
 import os
 import plistlib
+import re
 import shutil
 import stat
 import tempfile
@@ -344,6 +345,39 @@ class ProjectPackagingContractTests(unittest.TestCase):
         self.assertIn("LBQueueTendiesVerificationAndWait", preferences)
         self.assertIn("descriptorStoreState", preferences)
         self.assertIn("native gallery visibility, selectability, or wallpaper application", preferences)
+
+
+class ValidatorLimitsParityTests(unittest.TestCase):
+    PROJECT = Path(__file__).resolve().parents[1]
+
+    def test_python_inspector_limits_match_on_device_validator(self):
+        inspector = (self.PROJECT / "tools" / "tendies_inspect.py").read_text()
+        native = (self.PROJECT / "Preferences" / "LBTendiesValidator.m").read_text()
+
+        def number(source, pattern, label, multiplier=1):
+            match = re.search(pattern, source, re.MULTILINE)
+            self.assertIsNotNone(match, f"could not find {label}")
+            return int(match.group(1)) * multiplier
+
+        mib = 1024 * 1024
+        python_limits = {
+            "archive": number(inspector, r"^MAX_ARCHIVE_BYTES = (\d+) \* 1024 \* 1024$", "Python archive limit", mib),
+            "entries": number(inspector, r"^MAX_ENTRIES = (\d+)$", "Python entry limit"),
+            "member": number(inspector, r"^MAX_SINGLE_FILE_BYTES = (\d+) \* 1024 \* 1024$", "Python member limit", mib),
+            "total": number(inspector, r"^MAX_TOTAL_UNCOMPRESSED_BYTES = (\d+) \* 1024 \* 1024$", "Python total limit", mib),
+            "ratio": number(inspector, r"^MAX_COMPRESSION_RATIO = (\d+)$", "Python compression ratio"),
+            "plist": number(inspector, r"^MAX_PLIST_BYTES = (\d+) \* 1024 \* 1024$", "Python plist limit", mib),
+        }
+        native_limits = {
+            "archive": number(native, r"LBTMaxArchive = (\d+)ULL \* 1024ULL \* 1024ULL", "native archive limit", mib),
+            "entries": number(native, r"LBTMaxEntries = (\d+)", "native entry limit"),
+            "member": number(native, r"LBTMaxFile = (\d+)ULL \* 1024ULL \* 1024ULL", "native member limit", mib),
+            "total": number(native, r"LBTMaxTotal = (\d+)ULL \* 1024ULL \* 1024ULL", "native total limit", mib),
+            "ratio": number(native, r"\(uint64_t\)us>\(uint64_t\)cs\*(\d+)", "native compression ratio"),
+            "plist": number(native, r"LBTMaxPlist = (\d+) \* 1024 \* 1024", "native plist limit", mib),
+        }
+        self.assertEqual(python_limits, native_limits)
+
 
 if __name__ == "__main__":
     unittest.main()

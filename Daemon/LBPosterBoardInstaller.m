@@ -663,10 +663,12 @@ static BOOL LBReadExistingDescriptorMetadataIdentifier(NSString *descriptorPath,
             NSDictionary *lockAndHome = [assets[@"lockAndHome"] isKindOfClass:NSDictionary.class] ? assets[@"lockAndHome"] : nil;
             NSDictionary *defaults = [lockAndHome[@"default"] isKindOfClass:NSDictionary.class] ? lockAndHome[@"default"] : nil;
             NSNumber *wallpaperID = LBParseExistingNumericIdentifier(wallpaper[@"identifier"]);
-            NSNumber *defaultID = LBParseExistingNumericIdentifier(defaults[@"identifier"]);
-            if (!wallpaper || !wallpaperID || !defaultID ||
+            id rawDefaultID = defaults ? defaults[@"identifier"] : nil;
+            NSNumber *defaultID = rawDefaultID ? LBParseExistingNumericIdentifier(rawDefaultID) : nil;
+            if (!wallpaper || !wallpaperID || !defaults ||
+                (rawDefaultID && !defaultID) ||
                 ![representingID isEqualToNumber:wallpaperID] ||
-                ![representingID isEqualToNumber:defaultID]) {
+                (defaultID && ![representingID isEqualToNumber:defaultID])) {
                 if (error) *error = LBInstallError(66, [NSString stringWithFormat:
                     @"Existing provider user-info and Wallpaper.plist identifiers disagree: %@", relative]);
                 return NO;
@@ -681,8 +683,11 @@ static BOOL LBReadExistingDescriptorMetadataIdentifier(NSString *descriptorPath,
             NSDictionary *lockAndHome = [assets[@"lockAndHome"] isKindOfClass:NSDictionary.class] ? assets[@"lockAndHome"] : nil;
             NSDictionary *defaults = [lockAndHome[@"default"] isKindOfClass:NSDictionary.class] ? lockAndHome[@"default"] : nil;
             NSNumber *wallpaperID = LBParseExistingNumericIdentifier(wallpaper[@"identifier"]);
-            NSNumber *defaultID = LBParseExistingNumericIdentifier(defaults[@"identifier"]);
-            if (!wallpaper || !wallpaperID || !defaultID || ![wallpaperID isEqualToNumber:defaultID]) {
+            id rawDefaultID = defaults ? defaults[@"identifier"] : nil;
+            NSNumber *defaultID = rawDefaultID ? LBParseExistingNumericIdentifier(rawDefaultID) : nil;
+            if (!wallpaper || !wallpaperID || !defaults ||
+                (rawDefaultID && !defaultID) ||
+                (defaultID && ![wallpaperID isEqualToNumber:defaultID])) {
                 if (error) *error = LBInstallError(66, [NSString stringWithFormat:
                     @"Existing Wallpaper.plist has missing or inconsistent numeric identifiers: %@", relative]);
                 return NO;

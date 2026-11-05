@@ -201,6 +201,34 @@
     XCTAssertEqual([NSFileManager.defaultManager contentsOfDirectoryAtPath:descriptorRoot error:nil].count, 2u);
 }
 
+- (void)testRecoversMissingRootIdentifierWhenExistingDefaultLayerOmitsIdentifier {
+    NSString *input = [self makeDescriptorGroupWithNames:@[@"Metadata recovery without default ID"] missingFiles:[NSSet set]];
+    NSString *descriptorRoot = [self.temporaryRoot stringByAppendingPathComponent:@"PosterBoard/59/Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors"];
+    NSString *existing = [descriptorRoot stringByAppendingPathComponent:@"existing-descriptor"];
+    NSError *error = nil;
+    XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:descriptorRoot withIntermediateDirectories:YES attributes:nil error:&error], @"%@", error);
+    NSString *fixture = [[input stringByAppendingPathComponent:@"descriptors"] stringByAppendingPathComponent:@"fixture-1"];
+    XCTAssertTrue([[NSFileManager defaultManager] copyItemAtPath:fixture toPath:existing error:&error], @"%@", error);
+    XCTAssertTrue([[NSFileManager defaultManager] removeItemAtPath:[existing stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"] error:&error], @"%@", error);
+    NSString *wallpaperPath = [[existing stringByAppendingPathComponent:@"versions/1/contents/Fixture1.Custom.wallpaper"] stringByAppendingPathComponent:@"Wallpaper.plist"];
+    NSMutableDictionary *wallpaper = [[NSDictionary dictionaryWithContentsOfFile:wallpaperPath] mutableCopy];
+    NSMutableDictionary *assets = [wallpaper[@"assets"] mutableCopy];
+    NSMutableDictionary *lockAndHome = [assets[@"lockAndHome"] mutableCopy];
+    NSMutableDictionary *defaultLayer = [lockAndHome[@"default"] mutableCopy];
+    [defaultLayer removeObjectForKey:@"identifier"];
+    lockAndHome[@"default"] = defaultLayer;
+    assets[@"lockAndHome"] = lockAndHome;
+    wallpaper[@"assets"] = assets;
+    XCTAssertTrue([self writePlist:wallpaper toPath:wallpaperPath]);
+
+    NSDictionary *result = [LBPosterBoardInstaller installExtractedDescriptorTreeAtPath:input
+        descriptorRoot:descriptorRoot error:&error];
+    XCTAssertNotNil(result, @"%@", error);
+    XCTAssertNil(error);
+    XCTAssertEqual([result[@"installedDescriptorIdentifiers"] count], 1u);
+    XCTAssertEqual([NSFileManager.defaultManager contentsOfDirectoryAtPath:descriptorRoot error:nil].count, 2u);
+}
+
 - (void)testRefusesMetadataRecoveryWhenWallpaperIdentifiersDisagree {
     NSString *input = [self makeDescriptorGroupWithNames:@[@"Metadata mismatch"] missingFiles:[NSSet set]];
     NSString *descriptorRoot = [self.temporaryRoot stringByAppendingPathComponent:@"PosterBoard/59/Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors"];

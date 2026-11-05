@@ -96,7 +96,10 @@ static BOOL LBMediaWriteJPEG(UIImage *image, NSString *path, CGFloat quality, NS
             return NO;
         }
         NSInteger fps = 15;
-        NSInteger frames = MIN(400, MAX(2, (NSInteger)ceil(duration * fps)));
+        NSInteger maxFrames = 400;
+        NSInteger frames = duration >= ((double)maxFrames / (double)fps)
+            ? maxFrames
+            : MAX(1, (NSInteger)ceil(duration * (double)fps));
         duration = (double)frames / (double)fps;
         AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:asset];
         generator.appliesPreferredTrackTransform = YES;
