@@ -42,8 +42,8 @@ dpkg-deb --info "$deb"
 arch="$(dpkg-deb -f "$deb" Architecture)"
 pkg="$(dpkg-deb -f "$deb" Package)"
 version="$(dpkg-deb -f "$deb" Version)"
-if [[ "$version" != "0.1.0-20" ]]; then
-  echo "ERROR: expected package version 0.1.0-20; got '$version'" >&2
+if [[ "$version" != "0.1.0-21" ]]; then
+  echo "ERROR: expected package version 0.1.0-21; got '$version'" >&2
   exit 13
 fi
 if [[ "$arch" != "iphoneos-arm64" ]]; then

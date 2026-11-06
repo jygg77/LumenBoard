@@ -25,6 +25,16 @@ static BOOL LBRestartPosterBoard(void) {
     if (!killallPath) {
         killallPath = @"/usr/bin/killall";
     }
+
+    // Flush cfprefsd caches so daemons and apps immediately reload preferences from disk
+    pid_t cfPid = 0;
+    const char *cfArgv[] = { [killallPath fileSystemRepresentation], "-HUP", "cfprefsd", NULL };
+    posix_spawn(&cfPid, cfArgv[0], NULL, NULL, (char *const *)cfArgv, environ);
+    if (cfPid > 0) {
+        int status = 0;
+        waitpid(cfPid, &status, 0);
+    }
+
     BOOL pbKilled = NO;
     pid_t pid = 0;
     const char *argv[] = { [killallPath fileSystemRepresentation], "-9", "PosterBoard", NULL };
