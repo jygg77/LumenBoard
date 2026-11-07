@@ -7,7 +7,7 @@ THEOS_PACKAGE_SCHEME = rootless
 include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = LumenBoardPrefs
-LumenBoardPrefs_FILES = LBRootListController.m LBTendiesValidator.m ../Shared/LBPaths.m
+LumenBoardPrefs_FILES = LBRootListController.m LBPosterBoardWallpapersController.m LBTendiesValidator.m ../Shared/LBPaths.m
 LumenBoardPrefs_INSTALL_PATH = /Library/PreferenceBundles
 LumenBoardPrefs_FRAMEWORKS = UIKit PhotosUI Photos UniformTypeIdentifiers
 LumenBoardPrefs_PRIVATE_FRAMEWORKS = Preferences

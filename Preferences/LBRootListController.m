@@ -1,4 +1,5 @@
 #import "LBRootListController.h"
+#import "LBPosterBoardWallpapersController.h"
 #import "../Shared/LBPaths.h"
 #import "LBTendiesValidator.h"
 #import <CommonCrypto/CommonDigest.h>
@@ -148,12 +149,15 @@ static NSDictionary *LBQueueDaemonActionAndWait(NSString *identifier, NSString *
             return nil;
         }
     }
-    NSDictionary *request = @{
+    NSMutableDictionary *request = [NSMutableDictionary dictionaryWithDictionary:@{
         @"requestID": requestID,
         @"action": action,
         @"identifier": identifier ?: @"system",
         @"created": [NSDate date]
-    };
+    }];
+    if (manifest && !itemDirectory) {
+        [request addEntriesFromDictionary:manifest];
+    }
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:request
         format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
     if (!data) {
@@ -811,6 +815,37 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (NSDictionary *)sendDaemonRequestWithAction:(NSString *)action payload:(NSDictionary *)payload error:(NSError **)error {
+    NSMutableDictionary *p = payload ? [payload mutableCopy] : nil;
+    NSDictionary *completion = LBQueueDaemonActionAndWait(nil, action, p, nil, NULL, error);
+    return completion;
+}
+
+- (void)inspectPosterBoardWallpapersTapped {
+    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"PosterBoard" message:@"Lettura degli sfondi residenti nello store di PosterBoard in corso..." preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:loading animated:YES completion:^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *error = nil;
+            NSDictionary *completion = [self sendDaemonRequestWithAction:@"list-posterboard-wallpapers" payload:nil error:&error];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [loading dismissViewControllerAnimated:YES completion:^{
+                    if (completion && [completion[@"success"] boolValue]) {
+                        NSDictionary *res = [completion[@"result"] isKindOfClass:NSDictionary.class] ? completion[@"result"] : completion;
+                        NSArray *wallpapers = res[@"wallpapers"] ?: @[];
+                        NSString *container = res[@"container"] ?: @"";
+                        LBPosterBoardWallpapersController *vc = [[LBPosterBoardWallpapersController alloc] initWithWallpapers:wallpapers containerPath:container];
+                        vc.rootController = self;
+                        [self.navigationController pushViewController:vc animated:YES];
+                    } else {
+                        NSString *msg = completion[@"error"] ?: (error.localizedDescription ?: @"Impossibile comunicare con il demone di PosterBoard.");
+                        [self showMessage:@"Errore lettura sfondi" message:msg];
+                    }
+                }];
+            });
+        });
+    }];
 }
 
 @end

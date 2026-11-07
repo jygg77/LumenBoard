@@ -1842,4 +1842,184 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
     return YES;
 }
 
++ (NSArray<NSDictionary *> *)listAllPosterBoardWallpapersForContainer:(NSString *)containerPath {
+    if (!LBIsDirectory(containerPath)) return @[];
+    NSMutableArray<NSDictionary *> *results = [NSMutableArray array];
+    NSString *dataStoreBase = [containerPath stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    NSDictionary *providerNames = @{
+        @"com.apple.WallpaperKit.CollectionsPoster": @"Collezioni (Collections)",
+        @"com.apple.Posters.CollectionsPosterApp": @"Collezioni (App)",
+        @"com.apple.PhotosUIPrivate.PhotosPosterProvider": @"Foto (Photos)",
+        @"com.apple.GradientPoster.GradientPosterExtension": @"Colore (Color)",
+        @"com.apple.EmojiPoster.EmojiPosterExtension": @"Emoji",
+        @"com.apple.MercuryPoster": @"Astronomia (Astronomy)",
+        @"com.apple.WeatherPoster": @"Meteo (Weather)",
+        @"com.apple.Posters.WeatherPosterApp": @"Meteo (Weather)",
+        @"com.apple.Posters.UnityPosterApp": @"Unity",
+        @"com.apple.Posters.PridePosterApp": @"Pride",
+        @"com.apple.Posters.KaleidoscopePosterApp": @"Caleidoscopio"
+    };
+
+    for (NSString *v in @[@"59", @"61"]) {
+        NSString *vDir = [dataStoreBase stringByAppendingPathComponent:v];
+        if (!LBIsDirectory(vDir)) continue;
+        NSString *extDir = [vDir stringByAppendingPathComponent:@"Extensions"];
+        if (!LBIsDirectory(extDir)) continue;
+
+        NSArray<NSString *> *extensions = [fm contentsOfDirectoryAtPath:extDir error:nil] ?: @[];
+        for (NSString *ext in extensions) {
+            NSString *extPath = [extDir stringByAppendingPathComponent:ext];
+            if (!LBIsDirectory(extPath)) continue;
+            NSString *friendlyProvider = providerNames[ext] ?: ext.lastPathComponent;
+
+            for (NSString *sub in @[@"configurations", @"descriptors"]) {
+                NSString *subDir = [extPath stringByAppendingPathComponent:sub];
+                if (!LBIsDirectory(subDir)) continue;
+                BOOL isConfig = [sub isEqualToString:@"configurations"];
+
+                NSArray<NSString *> *uuids = [fm contentsOfDirectoryAtPath:subDir error:nil] ?: @[];
+                for (NSString *uuid in uuids) {
+                    if ([uuid hasPrefix:@"."] || [uuid isEqualToString:@"__MACOSX"]) continue;
+                    NSString *itemPath = [subDir stringByAppendingPathComponent:uuid];
+                    if (!LBIsDirectory(itemPath)) continue;
+
+                    NSString *name = nil;
+                    NSString *screenClass = nil;
+                    NSString *numericID = nil;
+
+                    NSString *idPath = [itemPath stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
+                    if (LBIsRegularFile(idPath)) {
+                        numericID = LBReadTrimmedString(idPath);
+                    }
+
+                    NSDirectoryEnumerator *scan = [fm enumeratorAtPath:itemPath];
+                    NSString *rel = nil;
+                    while ((rel = scan.nextObject)) {
+                        if ([rel.lastPathComponent caseInsensitiveCompare:@"Wallpaper.plist"] == NSOrderedSame) {
+                            NSString *wpPath = [itemPath stringByAppendingPathComponent:rel];
+                            NSDictionary *wp = [NSDictionary dictionaryWithContentsOfFile:wpPath];
+                            if ([wp isKindOfClass:NSDictionary.class]) {
+                                if ([wp[@"name"] isKindOfClass:NSString.class] && [wp[@"name"] length] > 0) {
+                                    name = wp[@"name"];
+                                }
+                                if ([wp[@"logicalScreenClass"] isKindOfClass:NSString.class]) {
+                                    screenClass = wp[@"logicalScreenClass"];
+                                }
+                                if (!numericID && wp[@"identifier"]) {
+                                    numericID = [NSString stringWithFormat:@"%@", wp[@"identifier"]];
+                                }
+                            }
+                            break;
+                        }
+                    }
+
+                    if (!name.length) {
+                        name = [NSString stringWithFormat:@"%@ %@", friendlyProvider, isConfig ? @"Lock Screen" : @"Wallpaper"];
+                    }
+
+                    NSDictionary *item = @{
+                        @"uuid": uuid,
+                        @"type": isConfig ? @"configuration" : @"descriptor",
+                        @"typeLabel": isConfig ? @"Blocco Schermo (Attivo)" : @"Galleria (Collezioni)",
+                        @"name": name,
+                        @"provider": ext,
+                        @"friendlyProvider": friendlyProvider,
+                        @"storeVersion": v,
+                        @"path": itemPath,
+                        @"screenClass": screenClass ?: @"(nativo)",
+                        @"numericID": numericID ?: @"-"
+                    };
+                    [results addObject:item];
+                }
+            }
+        }
+    }
+
+    return results;
+}
+
++ (BOOL)deletePosterBoardWallpaperAtPath:(NSString *)path
+                                container:(NSString *)containerPath
+                                    error:(NSError **)error {
+    if (!path.length || !containerPath.length) {
+        if (error) *error = LBInstallError(90, @"Percorso o container non valido.");
+        return NO;
+    }
+    NSString *cleanPath = path.stringByStandardizingPath;
+    NSString *cleanContainer = containerPath.stringByStandardizingPath;
+    if (![cleanPath hasPrefix:[cleanContainer stringByAppendingString:@"/"]]) {
+        if (error) *error = LBInstallError(91, @"Tentativo di eliminazione al di fuori del container di PosterBoard.");
+        return NO;
+    }
+    if (!LBIsDirectory(cleanPath)) {
+        if (error) *error = LBInstallError(92, @"La cartella dello sfondo specificata non esiste.");
+        return NO;
+    }
+
+    NSString *uuid = cleanPath.lastPathComponent;
+    BOOL isConfig = [cleanPath containsString:@"/configurations/"];
+    NSString *storeRoot = cleanPath;
+    while (storeRoot.length > cleanContainer.length &&
+           ![storeRoot.lastPathComponent isEqualToString:@"59"] &&
+           ![storeRoot.lastPathComponent isEqualToString:@"61"]) {
+        storeRoot = storeRoot.stringByDeletingLastPathComponent;
+    }
+
+    // 1. Remove filesystem directory
+    if (![NSFileManager.defaultManager removeItemAtPath:cleanPath error:error]) {
+        return NO;
+    }
+
+    // 2. If configuration, prune from SQLite database
+    if (isConfig && LBIsDirectory(storeRoot)) {
+        NSString *sqlitePath = [storeRoot stringByAppendingPathComponent:@"PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"];
+        if (LBIsRegularFile(sqlitePath)) {
+            sqlite3 *db = NULL;
+            if (sqlite3_open_v2(sqlitePath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+                sqlite3_busy_timeout(db, 3000);
+                sqlite3_stmt *stmt1 = NULL;
+                sqlite3_stmt *stmt2 = NULL;
+                sqlite3_prepare_v2(db, "DELETE FROM posterRoleMembership WHERE posterUUID = ?;", -1, &stmt1, NULL);
+                sqlite3_prepare_v2(db, "DELETE FROM poster WHERE UUID = ?;", -1, &stmt2, NULL);
+                if (stmt1) {
+                    sqlite3_bind_text(stmt1, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt1);
+                    sqlite3_finalize(stmt1);
+                }
+                if (stmt2) {
+                    sqlite3_bind_text(stmt2, 1, uuid.UTF8String, -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt2);
+                    sqlite3_finalize(stmt2);
+                }
+                sqlite3_close(db);
+            }
+        }
+
+        // Prune from switcher index
+        NSString *switcherIndex = [storeRoot stringByAppendingPathComponent:@"PRPosterRoleLockScreen-switcher-index.json"];
+        if (LBIsRegularFile(switcherIndex)) {
+            NSData *idxData = [NSData dataWithContentsOfFile:switcherIndex];
+            id json = idxData ? [NSJSONSerialization JSONObjectWithData:idxData options:NSJSONReadingMutableContainers error:nil] : nil;
+            if ([json isKindOfClass:NSMutableDictionary.class] && [json[@"entries"] isKindOfClass:NSMutableDictionary.class]) {
+                NSMutableDictionary *entries = json[@"entries"];
+                [entries removeObjectForKey:uuid];
+                NSData *newIdx = [NSJSONSerialization dataWithJSONObject:json options:0 error:nil];
+                if (newIdx) LBWriteDataAtomically(newIdx, switcherIndex, NULL);
+            }
+        }
+    } else if (LBIsDirectory(storeRoot)) {
+        // Prune from gallery index
+        NSString *galleryIndex = [storeRoot stringByAppendingPathComponent:@"PRPosterRoleLockScreen-gallery-index.json"];
+        if (LBIsRegularFile(galleryIndex)) {
+            [NSFileManager.defaultManager removeItemAtPath:galleryIndex error:nil];
+        }
+    }
+
+    // 3. Trigger PosterBoard reload
+    [self requestPosterBoardRefreshForContainer:containerPath];
+    return YES;
+}
+
 @end

@@ -38,6 +38,14 @@ NS_ASSUME_NONNULL_BEGIN
               posterBoardContainer:(NSString *)containerPath
                              error:(NSError * _Nullable * _Nullable)error;
 
+/// Lists all active configurations (Lock Screen switcher) and gallery descriptors resident in PosterBoard.
++ (NSArray<NSDictionary *> *)listAllPosterBoardWallpapersForContainer:(NSString *)containerPath;
+
+/// Deletes a specific wallpaper directory (configuration or descriptor) from PosterBoard and reloads.
++ (BOOL)deletePosterBoardWallpaperAtPath:(NSString *)path
+                                container:(NSString *)containerPath
+                                    error:(NSError * _Nullable * _Nullable)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

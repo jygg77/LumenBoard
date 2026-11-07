@@ -417,6 +417,27 @@ static NSDictionary *LBProcessRefreshRequest(__unused NSDictionary *request, NSE
     return report;
 }
 
+static NSDictionary *LBProcessListWallpapersRequest(__unused NSDictionary *request, NSError **error) {
+    NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:error];
+    if (!container) return nil;
+    NSArray *list = [LBPosterBoardInstaller listAllPosterBoardWallpapersForContainer:container];
+    return @{ @"wallpapers": list ?: @[], @"container": container };
+}
+
+static NSDictionary *LBProcessDeleteWallpaperRequest(NSDictionary *request, NSError **error) {
+    NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:error];
+    if (!container) return nil;
+    NSString *path = [request[@"path"] isKindOfClass:NSString.class] ? request[@"path"] : nil;
+    if (!path.length) {
+        if (error) *error = [NSError errorWithDomain:@"com.iuyghi.LumenBoard.Daemon" code:140 userInfo:@{NSLocalizedDescriptionKey:@"Percorso sfondo mancante."}];
+        return nil;
+    }
+    BOOL deleted = [LBPosterBoardInstaller deletePosterBoardWallpaperAtPath:path container:container error:error];
+    if (!deleted) return nil;
+    BOOL restarted = LBRestartPosterBoard();
+    return @{ @"deleted": @YES, @"path": path, @"posterBoardRestarted": @(restarted) };
+}
+
 static void LBProcessRequests(void) {
     [LBRequestLock lock];
     @try {
@@ -462,6 +483,10 @@ static void LBProcessRequests(void) {
                 operationResult = LBProcessMediaInstallRequest(request, &operationError);
             } else if ([action isEqualToString:@"refresh-posterboard"]) {
                 operationResult = LBProcessRefreshRequest(request, &operationError);
+            } else if ([action isEqualToString:@"list-posterboard-wallpapers"]) {
+                operationResult = LBProcessListWallpapersRequest(request, &operationError);
+            } else if ([action isEqualToString:@"delete-posterboard-wallpaper"]) {
+                operationResult = LBProcessDeleteWallpaperRequest(request, &operationError);
             } else {
                 operationError = [NSError errorWithDomain:@"com.iuyghi.LumenBoard.Daemon" code:110 userInfo:@{NSLocalizedDescriptionKey:@"Unsupported daemon action."}];
             }
@@ -529,19 +554,20 @@ static pid_t LBReadDaemonPID(void) {
 }
 
 static void LBPrintUsage(void) {
-    printf("LumenBoard Daemon (lumenboardd) v0.1.0-23\n");
+    printf("LumenBoard Daemon (lumenboardd) v0.1.0-24\n");
     printf("Usage: lumenboardd [option]\n\n");
     printf("Options:\n");
-    printf("  --status, -s    Print daemon status, PosterBoard container, and installed wallpapers\n");
-    printf("  --refresh, -r   Force PosterBoard cache reload and restart PosterBoard\n");
-    printf("  --version, -v   Print version information\n");
-    printf("  --help, -h      Display this help message\n");
-    printf("  (no arguments)  Run daemon in background (or managed by launchd)\n");
+    printf("  --status, -s           Print daemon status, PosterBoard container, and resident wallpapers\n");
+    printf("  --refresh, -r          Force PosterBoard cache reload and restart PosterBoard\n");
+    printf("  --delete, -d <UUID>    Delete a resident wallpaper (configuration or descriptor) by UUID\n");
+    printf("  --version, -v          Print version information\n");
+    printf("  --help, -h             Display this help message\n");
+    printf("  (no arguments)         Run daemon in background (or managed by launchd)\n");
 }
 
 static void LBPrintStatus(void) {
     printf("========================================\n");
-    printf("     LumenBoard System Status (0.1.0-23)\n");
+    printf("     LumenBoard System Status (0.1.0-24)\n");
     printf("========================================\n\n");
 
     pid_t daemonPID = LBReadDaemonPID();
@@ -554,39 +580,49 @@ static void LBPrintStatus(void) {
     NSError *containerError = nil;
     NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:&containerError];
     if (container.length) {
-        printf("PosterBoard Container: %s\n", container.UTF8String);
+        printf("PosterBoard Container: %s\n\n", container.UTF8String);
     } else {
-        printf("PosterBoard Container: NOT FOUND (%s)\n",
+        printf("PosterBoard Container: NOT FOUND (%s)\n\n",
                containerError.localizedDescription ? containerError.localizedDescription.UTF8String : "unknown");
+        return;
     }
 
-    NSString *dataStoreBase = [container stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
-    for (NSString *v in @[@"59", @"61"]) {
-        NSString *vPath = [dataStoreBase stringByAppendingPathComponent:v];
-        struct stat st;
-        BOOL exists = (lstat(vPath.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode));
-        printf("DataStore %s:     %s\n", v.UTF8String, exists ? "PRESENT" : "absent");
-        if (exists) {
-            for (NSString *ext in @[@"com.apple.WallpaperKit.CollectionsPoster", @"com.apple.Posters.CollectionsPosterApp"]) {
-                NSString *descRoot = [[[vPath stringByAppendingPathComponent:@"Extensions"] stringByAppendingPathComponent:ext] stringByAppendingPathComponent:@"descriptors"];
-                NSArray *items = [NSFileManager.defaultManager contentsOfDirectoryAtPath:descRoot error:nil];
-                if (items.count > 0) {
-                    printf("  Extension: %s (%lu descriptors)\n", ext.UTF8String, (unsigned long)items.count);
-                    for (NSString *uuid in items) {
-                        NSString *descPath = [descRoot stringByAppendingPathComponent:uuid];
-                        NSString *idPath = [descPath stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
-                        NSString *numID = [NSString stringWithContentsOfFile:idPath encoding:NSUTF8StringEncoding error:nil] ?: @"?";
-                        numID = [numID stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                        BOOL hasV0 = [NSFileManager.defaultManager fileExistsAtPath:[descPath stringByAppendingPathComponent:@"versions/0"]];
-                        BOOL hasV1 = [NSFileManager.defaultManager fileExistsAtPath:[descPath stringByAppendingPathComponent:@"versions/1"]];
-                        printf("    - UUID: %s | ID: %s | versions: [%s%s]\n",
-                               uuid.UTF8String, numID.UTF8String, hasV0 ? "v0" : "", hasV1 ? (hasV0 ? "+v1" : "v1") : "");
-                    }
-                }
-            }
+    NSArray<NSDictionary *> *wallpapers = [LBPosterBoardInstaller listAllPosterBoardWallpapersForContainer:container];
+    NSMutableArray<NSDictionary *> *configs = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *descriptors = [NSMutableArray array];
+
+    for (NSDictionary *wp in wallpapers) {
+        if ([wp[@"type"] isEqualToString:@"configuration"]) {
+            [configs addObject:wp];
+        } else {
+            [descriptors addObject:wp];
         }
     }
-    printf("========================================\n");
+
+    printf("--- [1] SFONDI ATTIVI / SWITCHER (configurations: %lu) ---\n", (unsigned long)configs.count);
+    if (configs.count == 0) {
+        printf("  (Nessuna configurazione trovata nel data store)\n");
+    } else {
+        for (NSDictionary *wp in configs) {
+            printf("  • Nome: %s\n", [wp[@"name"] UTF8String]);
+            printf("    UUID: %s | Provider: %s (Store v%s)\n",
+                   [wp[@"uuid"] UTF8String], [wp[@"friendlyProvider"] UTF8String], [wp[@"storeVersion"] UTF8String]);
+        }
+    }
+    printf("\n");
+
+    printf("--- [2] SFONDI GALLERIA / COLLEZIONI (descriptors: %lu) ---\n", (unsigned long)descriptors.count);
+    if (descriptors.count == 0) {
+        printf("  (Nessun descrittore trovato nella galleria)\n");
+    } else {
+        for (NSDictionary *wp in descriptors) {
+            printf("  • Nome: %s\n", [wp[@"name"] UTF8String]);
+            printf("    UUID: %s | ID: %s | Schermo: %s | %s\n",
+                   [wp[@"uuid"] UTF8String], [wp[@"numericID"] UTF8String],
+                   [wp[@"screenClass"] UTF8String], [wp[@"friendlyProvider"] UTF8String]);
+        }
+    }
+    printf("\n========================================\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -598,7 +634,7 @@ int main(int argc, char *argv[]) {
                 return 0;
             }
             if ([arg isEqualToString:@"--version"] || [arg isEqualToString:@"-v"]) {
-                printf("LumenBoard daemon v0.1.0-23 (arm64-rootless)\n");
+                printf("LumenBoard daemon v0.1.0-24 (arm64-rootless)\n");
                 return 0;
             }
             if ([arg isEqualToString:@"--status"] || [arg isEqualToString:@"-s"]) {
@@ -618,6 +654,38 @@ int main(int argc, char *argv[]) {
                 } else {
                     printf("[LumenBoard] Refresh flags written. PosterBoard process reload attempted.\n");
                 }
+                return 0;
+            }
+            if (([arg isEqualToString:@"--delete"] || [arg isEqualToString:@"-d"]) && argc > 2) {
+                NSString *targetUUID = [NSString stringWithUTF8String:argv[2]];
+                printf("[LumenBoard] Searching for wallpaper with UUID %s...\n", targetUUID.UTF8String);
+                NSError *error = nil;
+                NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:&error];
+                if (!container) {
+                    printf("ERROR: PosterBoard container not found: %s\n", error.localizedDescription.UTF8String);
+                    return 1;
+                }
+                NSArray<NSDictionary *> *wallpapers = [LBPosterBoardInstaller listAllPosterBoardWallpapersForContainer:container];
+                NSDictionary *match = nil;
+                for (NSDictionary *wp in wallpapers) {
+                    if ([wp[@"uuid"] caseInsensitiveCompare:targetUUID] == NSOrderedSame) {
+                        match = wp;
+                        break;
+                    }
+                }
+                if (!match) {
+                    printf("ERROR: No wallpaper found with UUID '%s' in PosterBoard.\n", targetUUID.UTF8String);
+                    return 1;
+                }
+                printf("[LumenBoard] Found %s (%s). Deleting from PosterBoard...\n",
+                       [match[@"name"] UTF8String], [match[@"typeLabel"] UTF8String]);
+                NSError *deleteError = nil;
+                if (![LBPosterBoardInstaller deletePosterBoardWallpaperAtPath:match[@"path"] container:container error:&deleteError]) {
+                    printf("ERROR deleting wallpaper: %s\n", deleteError.localizedDescription.UTF8String);
+                    return 1;
+                }
+                LBRestartPosterBoard();
+                printf("[LumenBoard] Successfully deleted '%s' and restarted PosterBoard!\n", [match[@"name"] UTF8String]);
                 return 0;
             }
             printf("Unknown option: %s. Run 'lumenboardd --help' for usage.\n", argv[1]);

@@ -42,8 +42,8 @@ dpkg-deb --info "$deb"
 arch="$(dpkg-deb -f "$deb" Architecture)"
 pkg="$(dpkg-deb -f "$deb" Package)"
 version="$(dpkg-deb -f "$deb" Version)"
-if [[ "$version" != "0.1.0-23" ]]; then
-  echo "ERROR: expected package version 0.1.0-23; got '$version'" >&2
+if [[ "$version" != "0.1.0-24" ]]; then
+  echo "ERROR: expected package version 0.1.0-24; got '$version'" >&2
   exit 13
 fi
 if [[ "$arch" != "iphoneos-arm64" ]]; then
@@ -90,7 +90,7 @@ expected = {
     "CFBundleIdentifier": "com.iuyghi.lumenboard.preferences",
     "CFBundleExecutable": "LumenBoardPrefs",
     "CFBundlePackageType": "BNDL",
-    "CFBundleVersion": "23",
+    "CFBundleVersion": "24",
     "NSPrincipalClass": "LumenBoardRootListController",
 }
 for key, value in expected.items():
