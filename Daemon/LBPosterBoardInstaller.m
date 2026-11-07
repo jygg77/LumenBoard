@@ -206,13 +206,13 @@ static NSString *LBReadTrimmedString(NSString *path) {
 static BOOL LBIsPositiveNumericIdentifier(id value) {
     if ([value isKindOfClass:NSNumber.class]) {
         long long number = [(NSNumber *)value longLongValue];
-        return number > 0 && number <= 999999;
+        return number > 0 && number <= 999999999LL;
     }
     if ([value isKindOfClass:NSString.class]) {
         NSString *trimmed = [(NSString *)value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         NSScanner *scanner = trimmed.length ? [NSScanner scannerWithString:trimmed] : nil;
         long long number = 0;
-        return scanner && [scanner scanLongLong:&number] && scanner.isAtEnd && number > 0 && number <= 999999;
+        return scanner && [scanner scanLongLong:&number] && scanner.isAtEnd && number > 0 && number <= 999999999LL;
     }
     return NO;
 }
@@ -281,7 +281,7 @@ static BOOL LBValidateCAMLDocumentAtPath(NSString *path, NSString *layerPath, NS
     return YES;
 }
 
-static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
+static BOOL LBValidateDescriptorTree(NSString *root, BOOL requireRootMetadata, NSError **error) {
     if (!LBIsDirectory(root)) {
         if (error) *error = LBInstallError(20, @"A descriptor entry is not a regular directory.");
         return NO;
@@ -306,15 +306,28 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
     NSScanner *identifierScanner = descriptorID.length ? [NSScanner scannerWithString:descriptorID] : nil;
     long long parsedIdentifier = 0;
     BOOL numericDescriptorID = identifierScanner && [identifierScanner scanLongLong:&parsedIdentifier] &&
-        identifierScanner.isAtEnd && parsedIdentifier > 0;
-    if (!numericDescriptorID || !LBIsRegularFile(rolePath) || !LBIsRegularFile(providerInfoPath)) {
-        if (error) *error = LBInstallError(22, @"Descriptor is missing its numeric root identifier, role identifier, or providerInfo.plist.");
-        return NO;
-    }
-    NSData *providerInfo = [NSData dataWithContentsOfFile:providerInfoPath];
-    if (!providerInfo || ![NSPropertyListSerialization propertyListWithData:providerInfo options:NSPropertyListImmutable format:nil error:nil]) {
-        if (error) *error = LBInstallError(23, @"providerInfo.plist is not a readable property list.");
-        return NO;
+        identifierScanner.isAtEnd && parsedIdentifier > 0 && parsedIdentifier <= 999999999LL;
+
+    if (requireRootMetadata) {
+        if (!numericDescriptorID || !LBIsRegularFile(rolePath) || !LBIsRegularFile(providerInfoPath)) {
+            if (error) *error = LBInstallError(22, @"Descriptor is missing its numeric root identifier, role identifier, or providerInfo.plist.");
+            return NO;
+        }
+        NSData *providerInfo = [NSData dataWithContentsOfFile:providerInfoPath];
+        if (!providerInfo || ![NSPropertyListSerialization propertyListWithData:providerInfo options:NSPropertyListImmutable format:nil error:nil]) {
+            if (error) *error = LBInstallError(23, @"providerInfo.plist is not a readable property list.");
+            return NO;
+        }
+    } else {
+        // Source archives may not contain root metadata files (or may have non-numeric placeholders);
+        // LBRewriteDescriptorIdentifiers will generate valid files during staging.
+        if (LBIsRegularFile(providerInfoPath)) {
+            NSData *providerInfo = [NSData dataWithContentsOfFile:providerInfoPath];
+            if (providerInfo && ![NSPropertyListSerialization propertyListWithData:providerInfo options:NSPropertyListImmutable format:nil error:nil]) {
+                if (error) *error = LBInstallError(23, @"providerInfo.plist is present but not a readable property list.");
+                return NO;
+            }
+        }
     }
 
     __block NSUInteger wallpaperCount = 0;
@@ -337,11 +350,15 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
             NSDictionary *userInfo = userInfoObject;
             NSString *representingName = [userInfo[@"wallpaperRepresentingFileName"] isKindOfClass:NSString.class] ? userInfo[@"wallpaperRepresentingFileName"] : nil;
             id representingID = userInfo[@"wallpaperRepresentingIdentifier"];
+            BOOL validRepID = [representingID isKindOfClass:NSString.class] || LBIsPositiveNumericIdentifier(representingID);
+            if (!requireRootMetadata && !validRepID) {
+                validRepID = [representingID description].length > 0;
+            }
             if (!representingName.length ||
                 !LBPathIsSafeRelative(representingName) ||
                 [representingName rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound ||
                 [representingName containsString:@":"] ||
-                !([representingID isKindOfClass:NSString.class] || LBIsPositiveNumericIdentifier(representingID))) {
+                !validRepID) {
                 if (error) *error = LBInstallError(24, @"provider contents user-info is missing a safe wallpaper filename or identifier.");
                 return NO;
             }
@@ -372,8 +389,12 @@ static BOOL LBValidateDescriptorTree(NSString *root, NSError **error) {
             NSDictionary *defaults = [lockAndHome[@"default"] isKindOfClass:NSDictionary.class] ? lockAndHome[@"default"] : nil;
             NSString *backgroundName = [defaults[@"backgroundAnimationFileName"] isKindOfClass:NSString.class] ? defaults[@"backgroundAnimationFileName"] : nil;
             NSString *floatingName = [defaults[@"floatingAnimationFileNameKey"] isKindOfClass:NSString.class] ? defaults[@"floatingAnimationFileNameKey"] : nil;
+            BOOL hasValidID = LBIsPositiveNumericIdentifier(wallpaper[@"identifier"]);
+            if (!requireRootMetadata && !hasValidID) {
+                hasValidID = [wallpaper[@"identifier"] description].length > 0;
+            }
             if (![wallpaper isKindOfClass:NSDictionary.class] ||
-                !LBIsPositiveNumericIdentifier(wallpaper[@"identifier"]) ||
+                !hasValidID ||
                 ![wallpaper[@"name"] isKindOfClass:NSString.class] ||
                 !assets ||
                 (backgroundName && (!LBPathIsSafeRelative(backgroundName) || [backgroundName containsString:@":"])) ||
@@ -737,7 +758,7 @@ static NSNumber *LBParseExistingNumericIdentifier(id value) {
     } else {
         return nil;
     }
-    if (parsed <= 0 || parsed > 999999) return nil;
+    if (parsed <= 0 || parsed > 999999999LL) return nil;
     return @(parsed);
 }
 
@@ -1353,7 +1374,7 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
             continue;
         }
         NSError *validationError = nil;
-        if (!LBValidateDescriptorTree(descriptorPath, &validationError) ||
+        if (!LBValidateDescriptorTree(descriptorPath, YES, &validationError) ||
             !LBValidatePublishedDescriptorIdentifierConsistency(descriptorPath, &validationError)) {
             [invalid addObject:@{
                 @"identifier": uuid,
@@ -1483,7 +1504,7 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
     NSMutableArray<NSString *> *sourceRoots = [NSMutableArray array];
     BOOL orderedGroup = NO;
     if (!LBCollectDescriptorRoots(extractedPath, sourceRoots, &orderedGroup, error)) return nil;
-    for (NSString *source in sourceRoots) if (!LBValidateDescriptorTree(source, error)) return nil;
+    for (NSString *source in sourceRoots) if (!LBValidateDescriptorTree(source, NO, error)) return nil;
 
     NSString *extensionRoot = descriptorRoot.stringByDeletingLastPathComponent;
     if (!LBEnsureDirectoryTree(extensionRoot, 0755, error) || !LBEnsureDirectoryTree(descriptorRoot, 0755, error)) return nil;
@@ -1571,7 +1592,7 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
         // A successful rename alone is not treated as a complete registration.
         for (NSString *path in committedPaths) {
             NSError *verificationError = nil;
-            if (!LBValidateDescriptorTree(path, &verificationError) ||
+            if (!LBValidateDescriptorTree(path, YES, &verificationError) ||
                 !LBValidatePublishedDescriptorIdentifierConsistency(path, &verificationError)) {
                 localError = verificationError ?: LBInstallError(67, @"A published descriptor failed its post-publication structure or identifier verification.");
                 success = NO;

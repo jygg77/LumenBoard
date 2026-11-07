@@ -7,6 +7,8 @@
 #import <errno.h>
 #import <spawn.h>
 #import <sys/wait.h>
+#import <sys/file.h>
+#import <signal.h>
 #import "../Shared/LBPaths.h"
 #import "LBPosterBoardInstaller.h"
 #import "LBPosterMediaBuilder.h"
@@ -492,15 +494,155 @@ static void LBNotificationCallback(CFNotificationCenterRef center, void *observe
     @autoreleasepool { LBProcessRequests(); }
 }
 
+static int LBAcquireDaemonLock(pid_t *existingPID) {
+    NSString *lockPath = [LBSupportRoot() stringByAppendingPathComponent:@"lumenboardd.lock"];
+    int fd = open(lockPath.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        char buf[64] = {0};
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        if (r > 0 && existingPID) {
+            *existingPID = (pid_t)atoi(buf);
+        }
+        close(fd);
+        return -2;
+    }
+    ftruncate(fd, 0);
+    lseek(fd, 0, SEEK_SET);
+    NSString *pidStr = [NSString stringWithFormat:@"%d\n", getpid()];
+    write(fd, pidStr.UTF8String, pidStr.length);
+    LBEnsureMobileOwnership(lockPath);
+    return fd;
+}
+
+static pid_t LBReadDaemonPID(void) {
+    NSString *lockPath = [LBSupportRoot() stringByAppendingPathComponent:@"lumenboardd.lock"];
+    int fd = open(lockPath.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return 0;
+    char buf[64] = {0};
+    ssize_t r = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (r <= 0) return 0;
+    pid_t pid = (pid_t)atoi(buf);
+    if (pid > 0 && kill(pid, 0) == 0) return pid;
+    return 0;
+}
+
+static void LBPrintUsage(void) {
+    printf("LumenBoard Daemon (lumenboardd) v0.1.0-23\n");
+    printf("Usage: lumenboardd [option]\n\n");
+    printf("Options:\n");
+    printf("  --status, -s    Print daemon status, PosterBoard container, and installed wallpapers\n");
+    printf("  --refresh, -r   Force PosterBoard cache reload and restart PosterBoard\n");
+    printf("  --version, -v   Print version information\n");
+    printf("  --help, -h      Display this help message\n");
+    printf("  (no arguments)  Run daemon in background (or managed by launchd)\n");
+}
+
+static void LBPrintStatus(void) {
+    printf("========================================\n");
+    printf("     LumenBoard System Status (0.1.0-23)\n");
+    printf("========================================\n\n");
+
+    pid_t daemonPID = LBReadDaemonPID();
+    if (daemonPID > 0) {
+        printf("Daemon Status:    ACTIVE (PID %d)\n", (int)daemonPID);
+    } else {
+        printf("Daemon Status:    NOT RUNNING (managed on demand by launchd)\n");
+    }
+
+    NSError *containerError = nil;
+    NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:&containerError];
+    if (container.length) {
+        printf("PosterBoard Container: %s\n", container.UTF8String);
+    } else {
+        printf("PosterBoard Container: NOT FOUND (%s)\n",
+               containerError.localizedDescription ? containerError.localizedDescription.UTF8String : "unknown");
+    }
+
+    NSString *dataStoreBase = [container stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
+    for (NSString *v in @[@"59", @"61"]) {
+        NSString *vPath = [dataStoreBase stringByAppendingPathComponent:v];
+        struct stat st;
+        BOOL exists = (lstat(vPath.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode));
+        printf("DataStore %s:     %s\n", v.UTF8String, exists ? "PRESENT" : "absent");
+        if (exists) {
+            for (NSString *ext in @[@"com.apple.WallpaperKit.CollectionsPoster", @"com.apple.Posters.CollectionsPosterApp"]) {
+                NSString *descRoot = [[[vPath stringByAppendingPathComponent:@"Extensions"] stringByAppendingPathComponent:ext] stringByAppendingPathComponent:@"descriptors"];
+                NSArray *items = [NSFileManager.defaultManager contentsOfDirectoryAtPath:descRoot error:nil];
+                if (items.count > 0) {
+                    printf("  Extension: %s (%lu descriptors)\n", ext.UTF8String, (unsigned long)items.count);
+                    for (NSString *uuid in items) {
+                        NSString *descPath = [descRoot stringByAppendingPathComponent:uuid];
+                        NSString *idPath = [descPath stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
+                        NSString *numID = [NSString stringWithContentsOfFile:idPath encoding:NSUTF8StringEncoding error:nil] ?: @"?";
+                        numID = [numID stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        BOOL hasV0 = [NSFileManager.defaultManager fileExistsAtPath:[descPath stringByAppendingPathComponent:@"versions/0"]];
+                        BOOL hasV1 = [NSFileManager.defaultManager fileExistsAtPath:[descPath stringByAppendingPathComponent:@"versions/1"]];
+                        printf("    - UUID: %s | ID: %s | versions: [%s%s]\n",
+                               uuid.UTF8String, numID.UTF8String, hasV0 ? "v0" : "", hasV1 ? (hasV0 ? "+v1" : "v1") : "");
+                    }
+                }
+            }
+        }
+    }
+    printf("========================================\n");
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
-        (void)argc; (void)argv;
-        LBRequestLock = [NSLock new];
+        if (argc > 1) {
+            NSString *arg = [NSString stringWithUTF8String:argv[1]];
+            if ([arg isEqualToString:@"--help"] || [arg isEqualToString:@"-h"]) {
+                LBPrintUsage();
+                return 0;
+            }
+            if ([arg isEqualToString:@"--version"] || [arg isEqualToString:@"-v"]) {
+                printf("LumenBoard daemon v0.1.0-23 (arm64-rootless)\n");
+                return 0;
+            }
+            if ([arg isEqualToString:@"--status"] || [arg isEqualToString:@"-s"]) {
+                LBPrintStatus();
+                return 0;
+            }
+            if ([arg isEqualToString:@"--refresh"] || [arg isEqualToString:@"-r"]) {
+                printf("[LumenBoard] Requesting PosterBoard reload...\n");
+                NSError *error = nil;
+                NSString *container = [LBPosterBoardInstaller findPosterBoardContainer:&error];
+                if (container) {
+                    [LBPosterBoardInstaller requestPosterBoardRefreshForContainer:container];
+                }
+                BOOL restarted = LBRestartPosterBoard();
+                if (restarted) {
+                    printf("[LumenBoard] PosterBoard was successfully restarted via killall -9.\n");
+                } else {
+                    printf("[LumenBoard] Refresh flags written. PosterBoard process reload attempted.\n");
+                }
+                return 0;
+            }
+            printf("Unknown option: %s. Run 'lumenboardd --help' for usage.\n", argv[1]);
+            return 1;
+        }
+
         NSError *error = nil;
         if (!LBEnsureDaemonDirectories(&error)) {
             NSLog(@"[LumenBoard] Cannot initialize support directories: %@", error);
             return 1;
         }
+
+        pid_t existingPID = 0;
+        int lockFD = LBAcquireDaemonLock(&existingPID);
+        if (lockFD == -2) {
+            if (isatty(STDOUT_FILENO)) {
+                printf("[LumenBoard] Daemon is already running in background (PID %d).\n", (int)existingPID);
+                printf("Use 'lumenboardd --status' to inspect active state, or 'lumenboardd --refresh' to reload PosterBoard.\n");
+            } else {
+                NSLog(@"[LumenBoard] Daemon is already running with PID %d. Exiting duplicate instance.", (int)existingPID);
+            }
+            return 0;
+        }
+
+        LBRequestLock = [NSLock new];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             LBNotificationCallback, (__bridge CFStringRef)LBDarwinReloadNotification(), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -509,7 +651,14 @@ int main(int argc, char *argv[]) {
             @autoreleasepool { LBProcessRequests(); }
         }];
         (void)timer;
+
+        if (isatty(STDOUT_FILENO)) {
+            printf("[LumenBoard] Daemon running in foreground (PID %d)...\n", getpid());
+            printf("[LumenBoard] Listening for requests. Press Ctrl+C to terminate.\n");
+        }
+
         [[NSRunLoop currentRunLoop] run];
+        if (lockFD >= 0) close(lockFD);
     }
     return 0;
 }

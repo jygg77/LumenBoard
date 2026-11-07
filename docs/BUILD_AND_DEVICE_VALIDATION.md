@@ -1,12 +1,12 @@
 # Build, package, and device validation
 
-> **Current-state note (0.1.0-22):** the detailed build record below is a historical 0.1.0-9 snapshot, not evidence for this working tree. The active candidate is maintained on `fix/rootless-deb-installation`; Debian version and Preferences `CFBundleVersion` are 0.1.0-22 and 22. The audited local changes have not been built in the current environment because Theos and an iOS SDK are absent. Native PosterBoard gallery recognition and wallpaper application remain device-only checks.
+> **Current-state note (0.1.0-23):** the detailed build record below is a historical 0.1.0-9 snapshot, not evidence for this working tree. The active candidate is maintained on `fix/rootless-deb-installation`; Debian version and Preferences `CFBundleVersion` are 0.1.0-23 and 23. The audited local changes have not been built in the current environment because Theos and an iOS SDK are absent. Native PosterBoard gallery recognition and wallpaper application remain device-only checks.
 
 ## Current candidate contract
 
 - Package: `com.iuyghi.lumenboard`
-- Debian version: `0.1.0-22`
-- Preferences `CFBundleVersion`: `22`
+- Debian version: `0.1.0-23`
+- Preferences `CFBundleVersion`: `23`
 - Architecture: `iphoneos-arm64`
 - Working branch: `fix/rootless-deb-installation`
 - Main branch remains separate and unchanged.

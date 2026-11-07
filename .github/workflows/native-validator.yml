@@ -140,7 +140,7 @@ jobs:
           dpkg-deb --contents "$DEB" | tee package-contents.txt
           dpkg-deb -f "$DEB" Package Version Architecture Depends | tee package-control.txt
           test "$(dpkg-deb -f "$DEB" Package)" = "com.iuyghi.lumenboard"
-          test "$(dpkg-deb -f "$DEB" Version)" = "0.1.0-22"
+          test "$(dpkg-deb -f "$DEB" Version)" = "0.1.0-23"
           test "$(dpkg-deb -f "$DEB" Architecture)" = "iphoneos-arm64"
           test "$(dpkg-deb -f "$DEB" Depends)" = "firmware (>= 16.0), firmware (<< 17.0), preferenceloader"
 
@@ -159,7 +159,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO")" = "LumenBoardPrefs"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$INFO")" = "BNDL"
           test "$(/usr/libexec/PlistBuddy -c 'Print :NSPrincipalClass' "$INFO")" = "LumenBoardRootListController"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO")" = "22"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO")" = "23"
 
           test -x "$PREFS"
           test -x "$DAEMON"
