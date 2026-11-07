@@ -817,7 +817,7 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (NSDictionary *)sendDaemonRequestWithAction:(NSString *)action payload:(NSDictionary *)payload error:(NSError **)error {
+- (nullable NSDictionary *)sendDaemonRequestWithAction:(NSString *)action payload:(nullable NSDictionary *)payload error:(NSError * _Nullable * _Nullable)error {
     NSMutableDictionary *p = payload ? [payload mutableCopy] : nil;
     NSDictionary *completion = LBQueueDaemonActionAndWait(nil, action, p, nil, NULL, error);
     return completion;

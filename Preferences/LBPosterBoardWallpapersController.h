@@ -2,14 +2,14 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class LBRootListController;
+@class LumenBoardRootListController;
 
 @interface LBPosterBoardWallpapersController : UITableViewController
 
-@property (nonatomic, copy) NSString *containerPath;
-@property (nonatomic, weak) id rootController;
+@property (nonatomic, copy, nullable) NSString *containerPath;
+@property (nonatomic, weak, nullable) id rootController;
 
-- (instancetype)initWithWallpapers:(NSArray<NSDictionary *> *)wallpapers containerPath:(NSString *)containerPath;
+- (instancetype)initWithWallpapers:(NSArray<NSDictionary *> *)wallpapers containerPath:(nullable NSString *)containerPath;
 
 @end
 
