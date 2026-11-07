@@ -338,7 +338,7 @@ jobs:
           ARCH="$(dpkg-deb -f "$DEB" Architecture)"
           DEPENDS="$(dpkg-deb -f "$DEB" Depends)"
           test "$PACKAGE" = "com.iuyghi.lumenboard"
-          test "$VERSION" = "0.1.0-21"
+          test "$VERSION" = "0.1.0-22"
           test "$ARCH" = "iphoneos-arm64"
           [[ "$DEPENDS" == *"firmware (>= 16.0)"* ]]
           [[ "$DEPENDS" == *"firmware (<< 17.0)"* ]]

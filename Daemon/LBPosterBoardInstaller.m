@@ -646,10 +646,28 @@ static BOOL LBRewriteDescriptorIdentifiers(NSString *root, NSInteger numericID, 
                 assets[@"lockAndHome"] = lockAndHome;
                 wallpaper[@"assets"] = assets;
             }
+
+            // Adapt logicalScreenClass for iPhone compatibility:
+            // Descriptors targeting iPad (~ipad) or missing a valid screen class are rejected
+            // by PosterBoard when running on iPhone. Adapt to 375w-812h@3x~iphone.
+            NSString *currentScreenClass = [wallpaper[@"logicalScreenClass"] isKindOfClass:NSString.class] ? wallpaper[@"logicalScreenClass"] : nil;
+            if (!currentScreenClass.length || [currentScreenClass containsString:@"~ipad"] || ![currentScreenClass containsString:@"~iphone"]) {
+                wallpaper[@"logicalScreenClass"] = @"375w-812h@3x~iphone";
+            }
+
             NSData *rewritten = [NSPropertyListSerialization dataWithPropertyList:wallpaper format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
             if (!rewritten || !LBWriteDataAtomically(rewritten, full, error)) return NO;
         }
     }
+
+    NSString *v0 = [root stringByAppendingPathComponent:@"versions/0"];
+    NSString *v1 = [root stringByAppendingPathComponent:@"versions/1"];
+    if (LBIsDirectory(v0) && !LBIsDirectory(v1)) {
+        [NSFileManager.defaultManager copyItemAtPath:v0 toPath:v1 error:nil];
+    } else if (LBIsDirectory(v1) && !LBIsDirectory(v0)) {
+        [NSFileManager.defaultManager copyItemAtPath:v1 toPath:v0 error:nil];
+    }
+
     return YES;
 }
 
@@ -1121,6 +1139,35 @@ static void LBCleanupStaleDescriptors(NSString *descriptorRoot) {
         }
 
         [seenIDs addObject:resolvedID];
+
+        // Self-heal versions: ensure both versions/0 and versions/1 exist for PosterBoard
+        NSString *v0 = [path stringByAppendingPathComponent:@"versions/0"];
+        NSString *v1 = [path stringByAppendingPathComponent:@"versions/1"];
+        if (LBIsDirectory(v0) && !LBIsDirectory(v1)) {
+            [NSFileManager.defaultManager copyItemAtPath:v0 toPath:v1 error:nil];
+        } else if (LBIsDirectory(v1) && !LBIsDirectory(v0)) {
+            [NSFileManager.defaultManager copyItemAtPath:v1 toPath:v0 error:nil];
+        }
+
+        // Self-heal logicalScreenClass: if any Wallpaper.plist declares ~ipad or missing screen class,
+        // normalize to 375w-812h@3x~iphone so it is recognized by PosterBoard on iPhone.
+        NSDirectoryEnumerator *scanWp = [NSFileManager.defaultManager enumeratorAtPath:path];
+        NSString *relWp = nil;
+        while ((relWp = scanWp.nextObject)) {
+            if ([relWp.lastPathComponent caseInsensitiveCompare:@"Wallpaper.plist"] == NSOrderedSame) {
+                NSString *wpFull = [path stringByAppendingPathComponent:relWp];
+                NSData *wpRaw = [NSData dataWithContentsOfFile:wpFull];
+                NSMutableDictionary *wpDict = wpRaw ? [NSPropertyListSerialization propertyListWithData:wpRaw options:NSPropertyListMutableContainers format:nil error:nil] : nil;
+                if ([wpDict isKindOfClass:NSMutableDictionary.class]) {
+                    NSString *sc = [wpDict[@"logicalScreenClass"] isKindOfClass:NSString.class] ? wpDict[@"logicalScreenClass"] : nil;
+                    if (!sc.length || [sc containsString:@"~ipad"] || ![sc containsString:@"~iphone"]) {
+                        wpDict[@"logicalScreenClass"] = @"375w-812h@3x~iphone";
+                        NSData *rewrittenWp = [NSPropertyListSerialization dataWithPropertyList:wpDict format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+                        if (rewrittenWp) [rewrittenWp writeToFile:wpFull atomically:YES];
+                    }
+                }
+            }
+        }
 
         NSString *rolePath = [path stringByAppendingPathComponent:@"com.apple.posterkit.role.identifier"];
         if (!LBIsRegularFile(rolePath)) {
@@ -1641,10 +1688,12 @@ static void LBCleanupStalePosterBoardDatabase(NSString *dbPath, NSString *storeR
 
         preferences[@"PBF_LOCALE_DID_CHANGE"] = @NO;
         preferences[@"PBF_RESET_FILE_PROTECTIONS"] = @YES;
-        preferences[@"PersistedPosterContainerBundleIdentifiers"] = @[
-            LBCollectionsAppExtension,
-            LBCollectionsExtension
-        ];
+        NSMutableArray *persisted = [preferences[@"PersistedPosterContainerBundleIdentifiers"] isKindOfClass:NSArray.class] ?
+            [preferences[@"PersistedPosterContainerBundleIdentifiers"] mutableCopy] : [NSMutableArray array];
+        for (NSString *ext in @[LBCollectionsAppExtension, LBCollectionsExtension]) {
+            if (![persisted containsObject:ext]) [persisted addObject:ext];
+        }
+        preferences[@"PersistedPosterContainerBundleIdentifiers"] = persisted;
         preferences[@"CompletedPosterBundleIdentifierMigrations"] = @[
             @"com.apple.Posters.UnityPosterApp.ExtragalacticPoster",
             @"com.apple.Posters.WeatherPosterApp.WeatherPoster",

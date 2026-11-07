@@ -342,6 +342,31 @@ static NSDictionary *LBProcessMediaInstallRequest(NSDictionary *request, NSError
     if (!descriptor) return nil;
     NSDictionary *installed = [LBPosterBoardInstaller installExtractedDescriptorTreeAtPath:generatedRoot descriptorRoot:descriptorRoot error:error];
     if (!installed) return nil;
+
+    NSString *applicationSupport = [container stringByAppendingPathComponent:@"Library/Application Support"];
+    NSString *dataStoreBase = [applicationSupport stringByAppendingPathComponent:@"PRBPosterExtensionDataStore"];
+    NSArray<NSString *> *installedUUIDs = installed[@"installedDescriptorIdentifiers"] ?: @[];
+    for (NSString *v in @[@"59", @"61"]) {
+        for (NSString *ext in @[@"com.apple.WallpaperKit.CollectionsPoster", @"com.apple.Posters.CollectionsPosterApp"]) {
+            NSString *targetDescRoot = [[[[dataStoreBase stringByAppendingPathComponent:v]
+                stringByAppendingPathComponent:@"Extensions"]
+                stringByAppendingPathComponent:ext]
+                stringByAppendingPathComponent:@"descriptors"];
+            if ([targetDescRoot isEqualToString:descriptorRoot]) continue;
+
+            [NSFileManager.defaultManager createDirectoryAtPath:targetDescRoot withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
+            for (NSString *uuid in installedUUIDs) {
+                NSString *src = [descriptorRoot stringByAppendingPathComponent:uuid];
+                NSString *dst = [targetDescRoot stringByAppendingPathComponent:uuid];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:src]) continue;
+                if ([[NSFileManager defaultManager] fileExistsAtPath:dst]) [NSFileManager.defaultManager removeItemAtPath:dst error:nil];
+                if ([NSFileManager.defaultManager copyItemAtPath:src toPath:dst error:nil]) {
+                    LBEnsureMobileOwnership(dst);
+                }
+            }
+        }
+    }
+
     NSMutableDictionary *report = [installed mutableCopy];
     [report addEntriesFromDictionary:[LBPosterBoardInstaller requestPosterBoardRefreshForContainer:container]];
     BOOL restarted = LBRestartPosterBoard();

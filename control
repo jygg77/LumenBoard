@@ -1,6 +1,6 @@
 Package: com.iuyghi.lumenboard
 Name: LumenBoard
-Version: 0.1.0-21
+Version: 0.1.0-22
 Architecture: iphoneos-arm64
 Description: Generate and import native image, video, and descriptor-format wallpapers into iOS 16 PosterBoard Collections.
 Maintainer: iuyghi

@@ -4,8 +4,8 @@ import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_DEBIAN_VERSION = "0.1.0-21"
-EXPECTED_BUNDLE_VERSION = "21"
+EXPECTED_DEBIAN_VERSION = "0.1.0-22"
+EXPECTED_BUNDLE_VERSION = "22"
 
 
 class VersionContractTests(unittest.TestCase):

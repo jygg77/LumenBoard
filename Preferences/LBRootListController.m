@@ -382,6 +382,38 @@ static NSDictionary *LBQueueTendiesVerificationAndWait(NSString *identifier, NSE
     PHPickerResult *result = results.firstObject;
     if (!result) return;
     NSItemProvider *provider = result.itemProvider;
+
+    if ([provider canLoadObjectOfClass:UIImage.class]) {
+        [provider loadObjectOfClass:UIImage.class completionHandler:^(UIImage *image, NSError *error) {
+            if (!image || error) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self showMessage:@"Import failed" message:error.localizedDescription ?: @"The selected image could not be read."];
+                });
+                return;
+            }
+            NSData *data = UIImageJPEGRepresentation(image, 0.92);
+            if (!data.length) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self showMessage:@"Import failed" message:@"The selected image could not be encoded as JPEG."];
+                });
+                return;
+            }
+            NSString *temporaryName = [NSString stringWithFormat:@"LumenBoard-%@.jpg", NSUUID.UUID.UUIDString.lowercaseString];
+            NSURL *stagedURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:temporaryName]];
+            NSError *stagingError = nil;
+            if (![data writeToURL:stagedURL options:NSDataWritingAtomic error:&stagingError] ||
+                chmod(stagedURL.path.fileSystemRepresentation, 0600) != 0) {
+                [NSFileManager.defaultManager removeItemAtURL:stagedURL error:nil];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self showMessage:@"Import failed" message:stagingError.localizedDescription ?: @"Could not stage the selected image safely."];
+                });
+                return;
+            }
+            [self importURL:stagedURL forcedExtension:@"jpg" type:@"image" cleanupTemporarySource:YES];
+        }];
+        return;
+    }
+
     BOOL isMovie = [provider hasItemConformingToTypeIdentifier:UTTypeMovie.identifier];
     NSString *typeIdentifier = isMovie ? UTTypeMovie.identifier : UTTypeImage.identifier;
     [provider loadFileRepresentationForTypeIdentifier:typeIdentifier completionHandler:^(NSURL *url, NSError *error) {
